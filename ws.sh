@@ -35,6 +35,12 @@ ws() {
         return 0
     fi
 
+    # Handle --clean option: delete workspaces without changes
+    if [[ "$workspace_name" == "--clean" || "$workspace_name" == "-c" ]]; then
+        _ws_clean_workspaces
+        return $?
+    fi
+
     # Get the repo name from the git root directory
     local repo_name
     repo_name=$(basename "$git_root")
@@ -130,6 +136,65 @@ _ws_list_workspaces() {
     fi
 }
 
+# Clean workspaces without any changes (staged, unstaged, or untracked)
+_ws_clean_workspaces() {
+    local git_root
+    git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ -z "$git_root" ]]; then
+        echo "Error: Not in a git repository" >&2
+        return 1
+    fi
+
+    # Get the main repo for worktree operations
+    local main_repo
+    main_repo=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
+    if [[ -z "$main_repo" ]]; then
+        main_repo="$git_root"
+    fi
+
+    local repo_name
+    repo_name=$(basename "$main_repo")
+
+    local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
+
+    if [[ ! -d "$repo_workspace_dir" ]]; then
+        echo "No workspaces found for this repository"
+        return 0
+    fi
+
+    local cleaned=0
+    local kept=0
+
+    for ws_dir in "$repo_workspace_dir"/*/; do
+        if [[ ! -d "$ws_dir" ]]; then
+            continue
+        fi
+
+        local ws_name
+        ws_name=$(basename "$ws_dir")
+
+        # Check if workspace has any changes (staged, unstaged, or untracked)
+        # git status --porcelain returns empty if clean
+        if [[ -z $(git -C "$ws_dir" status --porcelain 2>/dev/null) ]]; then
+            echo "Removing clean workspace: $ws_name"
+
+            # Remove worktree registration if it exists
+            git -C "$main_repo" worktree remove "$ws_dir" --force 2>/dev/null || rm -rf "$ws_dir"
+
+            ((cleaned++))
+        else
+            echo "Keeping workspace with changes: $ws_name"
+            ((kept++))
+        fi
+    done
+
+    echo ""
+    echo "Cleaned: $cleaned, Kept: $kept"
+
+    # Remove repo workspace dir if empty
+    rmdir "$repo_workspace_dir" 2>/dev/null || true
+}
+
 # Completion function for bash
 _ws_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -154,8 +219,8 @@ _ws_completions() {
         done
     fi
 
-    # Add --list option
-    workspaces+=("--list")
+    # Add options
+    workspaces+=("--list" "--clean")
 
     COMPREPLY=($(compgen -W "${workspaces[*]}" -- "$cur"))
 }
@@ -189,8 +254,8 @@ if [[ -n "$ZSH_VERSION" ]]; then
             done
         fi
 
-        # Add --list option
-        workspaces+=("--list")
+        # Add options
+        workspaces+=("--list" "--clean")
 
         _describe 'workspace' workspaces
     }
