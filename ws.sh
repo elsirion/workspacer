@@ -29,16 +29,27 @@ ws() {
         return 0
     fi
 
-    # Handle --list option
-    if [[ "$workspace_name" == "--list" || "$workspace_name" == "-l" ]]; then
-        _ws_list_workspaces
-        return 0
-    fi
-
-    # Handle --clean option: delete workspaces without changes
-    if [[ "$workspace_name" == "--clean" || "$workspace_name" == "-c" ]]; then
-        _ws_clean_workspaces
-        return $?
+    # Handle options (anything starting with - or --)
+    if [[ "$workspace_name" == -* ]]; then
+        case "$workspace_name" in
+            --list|-l)
+                _ws_list_workspaces
+                return 0
+                ;;
+            --clean|-c)
+                _ws_clean_workspaces
+                return $?
+                ;;
+            --help|-h)
+                _ws_help
+                return 0
+                ;;
+            *)
+                echo "Error: Unknown option '$workspace_name'" >&2
+                echo "Run 'ws --help' for usage information" >&2
+                return 1
+                ;;
+        esac
     fi
 
     # Get the repo name from the git root directory
@@ -195,6 +206,28 @@ _ws_clean_workspaces() {
     rmdir "$repo_workspace_dir" 2>/dev/null || true
 }
 
+# Show help message
+_ws_help() {
+    cat <<'EOF'
+ws - Workspace manager for git repositories
+
+Usage:
+  ws                    Go back to main repository directory
+  ws <name>             Create/enter workspace with given name
+  ws -l, --list         List all workspaces for current repo
+  ws -c, --clean        Delete workspaces without any changes
+  ws -h, --help         Show this help message
+
+Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
+organized by repository name.
+
+When entering a workspace, a branch named <year>-<month>-<name> is created
+or checked out, and direnv is allowed if .envrc exists.
+
+Use 'popd' to return to the previous directory after entering a workspace.
+EOF
+}
+
 # Completion function for bash
 _ws_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -220,7 +253,7 @@ _ws_completions() {
     fi
 
     # Add options
-    workspaces+=("--list" "--clean")
+    workspaces+=("--list" "--clean" "--help")
 
     COMPREPLY=($(compgen -W "${workspaces[*]}" -- "$cur"))
 }
@@ -255,7 +288,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
         fi
 
         # Add options
-        workspaces+=("--list" "--clean")
+        workspaces+=("--list" "--clean" "--help")
 
         _describe 'workspace' workspaces
     }
