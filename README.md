@@ -1,6 +1,8 @@
 # workspacer
 
-A workspace manager for git repositories. Creates isolated worktrees for feature development without cluttering your main repository.
+<img src="workspacer.png" align="right" width="120">
+
+A `git worktree`-based workspace manager for git repositories. Allows creating isolated worktrees for feature development without cluttering your main repository, deleting no longer used ones and offers fast navigation between different workspaces.
 
 ## Usage
 
