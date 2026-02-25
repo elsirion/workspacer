@@ -6,18 +6,18 @@
 : "${WORKSPACE_PATH:=${XDG_DATA_HOME:-$HOME/.local/share}/workspaces}"
 
 ws() {
-    local workspace_name="$1"
+    local workspace_arg="$1"
 
-    # Ensure we're in a git repository (or workspace)
+    # Check if we're in a git repository
     local git_root
     git_root=$(git rev-parse --show-toplevel 2>/dev/null)
-    if [[ -z "$git_root" ]]; then
-        echo "Error: Not in a git repository" >&2
-        return 1
-    fi
 
     # No argument: go back to main repo directory
-    if [[ -z "$workspace_name" ]]; then
+    if [[ -z "$workspace_arg" ]]; then
+        if [[ -z "$git_root" ]]; then
+            echo "Error: Not in a git repository" >&2
+            return 1
+        fi
         local main_repo
         # Check if we're in a worktree and get the main worktree path
         main_repo=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
@@ -30,8 +30,8 @@ ws() {
     fi
 
     # Handle options (anything starting with - or --)
-    if [[ "$workspace_name" == -* ]]; then
-        case "$workspace_name" in
+    if [[ "$workspace_arg" == -* ]]; then
+        case "$workspace_arg" in
             --list|-l)
                 _ws_list_workspaces
                 return 0
@@ -45,19 +45,69 @@ ws() {
                 return 0
                 ;;
             *)
-                echo "Error: Unknown option '$workspace_name'" >&2
+                echo "Error: Unknown option '$workspace_arg'" >&2
                 echo "Run 'ws --help' for usage information" >&2
                 return 1
                 ;;
         esac
     fi
 
-    # Get the repo name from the git root directory
-    local repo_name
-    repo_name=$(basename "$git_root")
+    # Parse <project>/<workspace> syntax
+    local repo_name workspace_name
+    if [[ "$workspace_arg" == */* ]]; then
+        # Split on first /
+        repo_name="${workspace_arg%%/*}"
+        workspace_name="${workspace_arg#*/}"
+
+        # Validate that both parts are non-empty
+        if [[ -z "$repo_name" || -z "$workspace_name" ]]; then
+            echo "Error: Invalid format. Use: ws <project>/<workspace>" >&2
+            return 1
+        fi
+
+        # Check if this project has any workspaces
+        if [[ ! -d "$WORKSPACE_PATH/$repo_name" ]]; then
+            echo "Error: No workspaces found for project '$repo_name'" >&2
+            echo "Available projects:" >&2
+            _ws_list_all_projects >&2
+            return 1
+        fi
+    else
+        # No slash, use current repo if we're in one
+        workspace_name="$workspace_arg"
+        if [[ -z "$git_root" ]]; then
+            echo "Error: Not in a git repository. Use <project>/<workspace> syntax to specify project." >&2
+            echo "Available projects:" >&2
+            _ws_list_all_projects >&2
+            return 1
+        fi
+        repo_name=$(basename "$git_root")
+    fi
 
     # Workspace directory path
     local workspace_dir="$WORKSPACE_PATH/$repo_name/$workspace_name"
+
+    # Find the main repository for this project
+    local main_repo_path=""
+    if [[ -n "$git_root" ]] && [[ "$(basename "$git_root")" == "$repo_name" ]]; then
+        # We're in the correct git repo
+        main_repo_path=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
+        if [[ -z "$main_repo_path" ]]; then
+            main_repo_path="$git_root"
+        fi
+    else
+        # Try to find an existing workspace for this project to get the main repo
+        if [[ -d "$WORKSPACE_PATH/$repo_name" ]]; then
+            for ws_dir in "$WORKSPACE_PATH/$repo_name"/*/; do
+                if [[ -d "$ws_dir/.git" ]] || [[ -f "$ws_dir/.git" ]]; then
+                    main_repo_path=$(git -C "$ws_dir" worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
+                    if [[ -n "$main_repo_path" ]]; then
+                        break
+                    fi
+                fi
+            done
+        fi
+    fi
 
     # Create workspace if it doesn't exist
     if [[ ! -d "$workspace_dir" ]]; then
@@ -68,17 +118,13 @@ ws() {
 
         # Clone/worktree the repository
         # Use git worktree for efficiency (shares .git objects)
-        if git -C "$git_root" worktree add "$workspace_dir" -b "_ws_temp_$$" 2>/dev/null; then
+        if [[ -n "$main_repo_path" ]] && git -C "$main_repo_path" worktree add "$workspace_dir" -b "_ws_temp_$$" 2>/dev/null; then
             # Remove the temporary branch, we'll create the proper one later
             git -C "$workspace_dir" branch -D "_ws_temp_$$" 2>/dev/null || true
         else
-            # Fallback: clone the repository
-            echo "Creating workspace via clone..."
-            git clone "$git_root" "$workspace_dir"
-            if [[ $? -ne 0 ]]; then
-                echo "Error: Failed to create workspace" >&2
-                return 1
-            fi
+            echo "Error: Cannot create workspace. No main repository found for project '$repo_name'" >&2
+            echo "Hint: Create the first workspace while in the git repository" >&2
+            return 1
         fi
     fi
 
@@ -119,6 +165,26 @@ ws() {
     fi
 
     return 0
+}
+
+# List all projects (repos) that have workspaces
+_ws_list_all_projects() {
+    if [[ ! -d "$WORKSPACE_PATH" ]]; then
+        echo "  (none)"
+        return
+    fi
+
+    local found=0
+    for project_dir in "$WORKSPACE_PATH"/*/; do
+        if [[ -d "$project_dir" ]]; then
+            basename "$project_dir"
+            found=1
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "  (none)"
+    fi
 }
 
 # List workspaces for the current repository
@@ -212,17 +278,21 @@ _ws_help() {
 ws - Workspace manager for git repositories
 
 Usage:
-  ws                    Go back to main repository directory
-  ws <name>             Create/enter workspace with given name
-  ws -l, --list         List all workspaces for current repo
-  ws -c, --clean        Delete workspaces without any changes
-  ws -h, --help         Show this help message
+  ws                        Go back to main repository directory
+  ws <name>                 Create/enter workspace with given name (requires being in a git repo)
+  ws <project>/<workspace>  Create/enter workspace for specific project (works from anywhere)
+  ws -l, --list             List all workspaces for current repo
+  ws -c, --clean            Delete workspaces without any changes
+  ws -h, --help             Show this help message
 
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
 
 When entering a workspace, a branch named <year>-<month>-<name> is created
 or checked out, and direnv is allowed if .envrc exists.
+
+The <project>/<workspace> syntax allows you to enter workspaces from any directory,
+even when not in a git repository. The project name is the repository directory name.
 
 Use 'popd' to return to the previous directory after entering a workspace.
 EOF
@@ -234,28 +304,72 @@ _ws_completions() {
     local git_root
     git_root=$(git rev-parse --show-toplevel 2>/dev/null)
 
-    if [[ -z "$git_root" ]]; then
-        return
+    local suggestions=()
+    local has_project_suggestions=0
+
+    # Check if input contains a slash (project/workspace syntax)
+    if [[ "$cur" == */* ]]; then
+        # Extract project name from current input
+        local project_prefix="${cur%%/*}"
+        local workspace_prefix="${cur#*/}"
+        local project_workspace_dir="$WORKSPACE_PATH/$project_prefix"
+
+        # Suggest workspaces from the specified project
+        if [[ -d "$project_workspace_dir" ]]; then
+            for ws_dir in "$project_workspace_dir"/*/; do
+                if [[ -d "$ws_dir" ]]; then
+                    local ws_name=$(basename "$ws_dir")
+                    suggestions+=("$project_prefix/$ws_name")
+                fi
+            done
+        fi
+    elif [[ -z "$git_root" ]]; then
+        # Not in a git repo and no slash - suggest all projects
+        if [[ -d "$WORKSPACE_PATH" ]]; then
+            for project_dir in "$WORKSPACE_PATH"/*/; do
+                if [[ -d "$project_dir" ]]; then
+                    local project_name=$(basename "$project_dir")
+                    suggestions+=("$project_name/")
+                    has_project_suggestions=1
+                fi
+            done
+        fi
+        # Add options
+        suggestions+=("--list" "--clean" "--help")
+    else
+        # In a git repo and no slash - suggest workspaces from current repo
+        local repo_name=$(basename "$git_root")
+        local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
+
+        if [[ -d "$repo_workspace_dir" ]]; then
+            for ws_dir in "$repo_workspace_dir"/*/; do
+                if [[ -d "$ws_dir" ]]; then
+                    suggestions+=("$(basename "$ws_dir")")
+                fi
+            done
+        fi
+
+        # Also suggest all projects with trailing slash for cross-project access
+        if [[ -d "$WORKSPACE_PATH" ]]; then
+            for project_dir in "$WORKSPACE_PATH"/*/; do
+                if [[ -d "$project_dir" ]]; then
+                    local project_name=$(basename "$project_dir")
+                    suggestions+=("$project_name/")
+                    has_project_suggestions=1
+                fi
+            done
+        fi
+
+        # Add options
+        suggestions+=("--list" "--clean" "--help")
     fi
 
-    local repo_name
-    repo_name=$(basename "$git_root")
+    COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
 
-    local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
-
-    local workspaces=()
-    if [[ -d "$repo_workspace_dir" ]]; then
-        for ws_dir in "$repo_workspace_dir"/*/; do
-            if [[ -d "$ws_dir" ]]; then
-                workspaces+=("$(basename "$ws_dir")")
-            fi
-        done
+    # Disable space after completion if we're suggesting projects with trailing slash
+    if [[ $has_project_suggestions -eq 1 ]]; then
+        compopt -o nospace 2>/dev/null
     fi
-
-    # Add options
-    workspaces+=("--list" "--clean" "--help")
-
-    COMPREPLY=($(compgen -W "${workspaces[*]}" -- "$cur"))
 }
 
 # Register bash completion
@@ -269,28 +383,77 @@ if [[ -n "$ZSH_VERSION" ]]; then
         local git_root
         git_root=$(git rev-parse --show-toplevel 2>/dev/null)
 
-        if [[ -z "$git_root" ]]; then
-            return
+        local -a workspaces projects options
+        local curcontext="$curcontext" state line
+        typeset -A opt_args
+
+        # Get current word being completed
+        local cur="${words[CURRENT]}"
+
+        # Check if input contains a slash (project/workspace syntax)
+        if [[ "$cur" == */* ]]; then
+            # Extract project name from current input
+            local project_prefix="${cur%%/*}"
+            local workspace_prefix="${cur#*/}"
+            local project_workspace_dir="$WORKSPACE_PATH/$project_prefix"
+
+            # Suggest workspaces from the specified project
+            if [[ -d "$project_workspace_dir" ]]; then
+                for ws_dir in "$project_workspace_dir"/*/; do
+                    if [[ -d "$ws_dir" ]]; then
+                        local ws_name=$(basename "$ws_dir")
+                        workspaces+=("$project_prefix/$ws_name")
+                    fi
+                done
+            fi
+            compadd -a workspaces
+        elif [[ -z "$git_root" ]]; then
+            # Not in a git repo and no slash - suggest all projects
+            if [[ -d "$WORKSPACE_PATH" ]]; then
+                for project_dir in "$WORKSPACE_PATH"/*/; do
+                    if [[ -d "$project_dir" ]]; then
+                        local project_name=$(basename "$project_dir")
+                        projects+=("$project_name/")
+                    fi
+                done
+            fi
+            # Add options
+            options=("--list" "--clean" "--help")
+
+            # Add projects without space, options with space
+            compadd -S '' -a projects
+            compadd -a options
+        else
+            # In a git repo and no slash - suggest workspaces from current repo
+            local repo_name=$(basename "$git_root")
+            local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
+
+            if [[ -d "$repo_workspace_dir" ]]; then
+                for ws_dir in "$repo_workspace_dir"/*/; do
+                    if [[ -d "$ws_dir" ]]; then
+                        workspaces+=("$(basename "$ws_dir")")
+                    fi
+                done
+            fi
+
+            # Also suggest all projects with trailing slash for cross-project access
+            if [[ -d "$WORKSPACE_PATH" ]]; then
+                for project_dir in "$WORKSPACE_PATH"/*/; do
+                    if [[ -d "$project_dir" ]]; then
+                        local project_name=$(basename "$project_dir")
+                        projects+=("$project_name/")
+                    fi
+                done
+            fi
+
+            # Add options
+            options=("--list" "--clean" "--help")
+
+            # Add workspaces and options with space, projects without space
+            compadd -a workspaces
+            compadd -S '' -a projects
+            compadd -a options
         fi
-
-        local repo_name
-        repo_name=$(basename "$git_root")
-
-        local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
-
-        local workspaces=()
-        if [[ -d "$repo_workspace_dir" ]]; then
-            for ws_dir in "$repo_workspace_dir"/*/; do
-                if [[ -d "$ws_dir" ]]; then
-                    workspaces+=("$(basename "$ws_dir")")
-                fi
-            done
-        fi
-
-        # Add options
-        workspaces+=("--list" "--clean" "--help")
-
-        _describe 'workspace' workspaces
     }
 
     compdef _ws_zsh_completions ws
