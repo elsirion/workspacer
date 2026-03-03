@@ -280,7 +280,7 @@ claude-sandbox() {
         return 1
     fi
 
-    _ws_run_sandboxed "$workdir" claude
+    _ws_run_sandboxed "$workdir" claude --dangerously-skip-permissions
 }
 
 # Run a shell in a sandboxed environment
@@ -321,7 +321,7 @@ wsc() {
         return 1
     fi
 
-    _ws_enter_and_sandbox "$1" claude
+    _ws_enter_and_sandbox "$1" claude --dangerously-skip-permissions
 }
 
 # Enter workspace and start sandboxed shell
