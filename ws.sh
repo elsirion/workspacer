@@ -225,6 +225,41 @@ _ws_run_sandboxed() {
         --setenv HOME "$HOME"
     )
 
+    # Mount git config and any included config files (read-only)
+    if [[ -f "$HOME/.gitconfig" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
+        # Parse includeIf paths and mount them too
+        local inc_path
+        while read -r _ inc_path; do
+            # Expand ~ to $HOME
+            inc_path="${inc_path/#\~/$HOME}"
+            if [[ -f "$inc_path" ]]; then
+                bwrap_args+=(--ro-bind "$inc_path" "$inc_path")
+            fi
+        done < <(git config --global --get-regexp 'includeIf\..*\.path' 2>/dev/null)
+    fi
+
+    # Mount GPG keyring (read-only) and agent socket for commit signing
+    if [[ -d "$HOME/.gnupg" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.gnupg" "$HOME/.gnupg")
+    fi
+    local gpg_socket_dir
+    gpg_socket_dir="$(gpgconf --list-dirs socketdir 2>/dev/null)"
+    if [[ -n "$gpg_socket_dir" && -d "$gpg_socket_dir" ]]; then
+        bwrap_args+=(--ro-bind "$gpg_socket_dir" "$gpg_socket_dir")
+    fi
+
+    # If workdir is a git worktree, mount the main repo's .git directory
+    # Worktrees have a .git file (not directory) pointing to .git/worktrees/<name>
+    if [[ -f "$workdir/.git" ]]; then
+        local git_common_dir
+        git_common_dir="$(git -C "$workdir" rev-parse --git-common-dir 2>/dev/null)"
+        if [[ -n "$git_common_dir" ]]; then
+            git_common_dir="$(cd "$workdir" && cd "$git_common_dir" && pwd)"
+            bwrap_args+=(--bind "$git_common_dir" "$git_common_dir")
+        fi
+    fi
+
     # Mount Claude config directory if it exists (read-write for session state)
     if [[ -d "$HOME/.claude" ]]; then
         bwrap_args+=(--bind "$HOME/.claude" "$HOME/.claude")
@@ -478,7 +513,8 @@ Sandbox Details:
   - Read-only access to /nix (for nix run/develop)
   - Read-only access to ~/.local/bin and ~/.local/lib (for MCP servers)
   - Process isolation (cannot see/signal other processes)
-  - No access to SSH keys, GPG keys, or other sensitive files
+  - No access to SSH keys or other sensitive files
+  - GPG signing works via agent forwarding (keys stay outside sandbox)
   - If .envrc exists, the direnv environment is loaded before entering
 EOF
 }
