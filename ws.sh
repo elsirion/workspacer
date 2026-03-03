@@ -248,6 +248,14 @@ _ws_run_sandboxed() {
         bwrap_args+=(--ro-bind "$HOME/.local/lib" "$HOME/.local/lib")
     fi
 
+    # Mount shell config files read-only so the user's shell environment works
+    local shell_configs=(.bashrc .bash_profile .profile .zshrc .zprofile .zshenv .inputrc)
+    for cfg in "${shell_configs[@]}"; do
+        if [[ -f "$HOME/$cfg" ]]; then
+            bwrap_args+=(--ro-bind "$HOME/$cfg" "$HOME/$cfg")
+        fi
+    done
+
     # Add /etc/static if it exists (NixOS)
     if [[ -d /etc/static ]]; then
         bwrap_args+=(--ro-bind /etc/static /etc/static)
