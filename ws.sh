@@ -167,6 +167,167 @@ ws() {
     return 0
 }
 
+# Internal: Run a command in a sandboxed environment
+# Usage: _ws_run_sandboxed <workdir> <command> [args...]
+_ws_run_sandboxed() {
+    local workdir="$1"
+    shift
+    local cmd=("$@")
+
+    # Resolve to absolute path
+    workdir=$(cd "$workdir" && pwd)
+
+    if [[ ! -d "$workdir" ]]; then
+        echo "Error: Directory does not exist: $workdir" >&2
+        return 1
+    fi
+
+    # Check for bubblewrap
+    if ! command -v bwrap &>/dev/null; then
+        echo "Error: bubblewrap (bwrap) is not installed" >&2
+        echo "Install it with: nix-shell -p bubblewrap" >&2
+        return 1
+    fi
+
+    echo "Starting sandbox in: $workdir"
+    echo "  - Filesystem: $workdir + ~/.claude are writable"
+    echo "  - Network: full access"
+    echo "  - Processes: isolated"
+
+    # Build the bwrap command
+    local -a bwrap_args=(
+        --unshare-all
+        --share-net
+        --die-with-parent
+        # Mount nix store read-only
+        --ro-bind /nix /nix
+        # System essentials (read-only)
+        --ro-bind /etc/resolv.conf /etc/resolv.conf
+        --ro-bind /etc/ssl /etc/ssl
+        --ro-bind /etc/hosts /etc/hosts
+        --ro-bind /etc/passwd /etc/passwd
+        --ro-bind /etc/group /etc/group
+        # NixOS-specific paths
+        --ro-bind /run/current-system /run/current-system
+        # Nix daemon socket for nix commands inside sandbox
+        --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
+        # Device and proc filesystems
+        --dev /dev
+        --proc /proc
+        # Tmpfs for temp files and fake home
+        --tmpfs /tmp
+        --tmpfs "$HOME"
+        # Workspace directory (read-write)
+        --bind "$workdir" "$workdir"
+        # Set working directory
+        --chdir "$workdir"
+        # Set HOME to actual home (on tmpfs, but with config mounted below)
+        --setenv HOME "$HOME"
+    )
+
+    # Mount Claude config directory if it exists (read-write for session state)
+    if [[ -d "$HOME/.claude" ]]; then
+        bwrap_args+=(--bind "$HOME/.claude" "$HOME/.claude")
+    fi
+
+    # Mount ~/.claude.json if it exists (contains MCP server config)
+    if [[ -f "$HOME/.claude.json" ]]; then
+        bwrap_args+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
+    fi
+
+    # Mount ~/.config/claude if it exists
+    if [[ -d "$HOME/.config/claude" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.config/claude" "$HOME/.config/claude")
+    fi
+
+    # Mount ~/.local for MCP servers (e.g., playwright) and user-installed tools
+    if [[ -d "$HOME/.local/bin" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.local/bin" "$HOME/.local/bin")
+    fi
+    if [[ -d "$HOME/.local/lib" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.local/lib" "$HOME/.local/lib")
+    fi
+
+    # Add /etc/static if it exists (NixOS)
+    if [[ -d /etc/static ]]; then
+        bwrap_args+=(--ro-bind /etc/static /etc/static)
+    fi
+
+    # Run with direnv environment if available
+    if command -v direnv &>/dev/null && [[ -f "$workdir/.envrc" ]]; then
+        echo "  - Environment: loaded from .envrc"
+        direnv exec "$workdir" bwrap "${bwrap_args[@]}" "${cmd[@]}"
+    else
+        bwrap "${bwrap_args[@]}" "${cmd[@]}"
+    fi
+}
+
+# Run claude in a sandboxed environment
+claude-sandbox() {
+    local workdir="${1:-$(pwd)}"
+
+    # Check for claude
+    if ! command -v claude &>/dev/null; then
+        echo "Error: claude is not installed" >&2
+        return 1
+    fi
+
+    _ws_run_sandboxed "$workdir" claude
+}
+
+# Run a shell in a sandboxed environment
+shell-sandbox() {
+    local workdir="${1:-$(pwd)}"
+    _ws_run_sandboxed "$workdir" bash
+}
+
+# Internal: Enter workspace and run a sandboxed command
+_ws_enter_and_sandbox() {
+    local workspace_arg="$1"
+    shift
+    local cmd=("$@")
+
+    if [[ -z "$workspace_arg" ]]; then
+        echo "Error: Workspace name required" >&2
+        return 1
+    fi
+
+    # Enter the workspace (this uses pushd internally)
+    ws "$workspace_arg" || return 1
+
+    # Run sandboxed command in the workspace
+    _ws_run_sandboxed "$(pwd)" "${cmd[@]}"
+}
+
+# Enter workspace and start sandboxed claude
+wsc() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        echo "wsc - Enter workspace and start sandboxed claude"
+        echo ""
+        echo "Usage: wsc <name>  or  wsc <project>/<workspace>"
+        return 0
+    fi
+
+    if ! command -v claude &>/dev/null; then
+        echo "Error: claude is not installed" >&2
+        return 1
+    fi
+
+    _ws_enter_and_sandbox "$1" claude
+}
+
+# Enter workspace and start sandboxed shell
+wss() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        echo "wss - Enter workspace and start sandboxed shell"
+        echo ""
+        echo "Usage: wss <name>  or  wss <project>/<workspace>"
+        return 0
+    fi
+
+    _ws_enter_and_sandbox "$1" bash
+}
+
 # List all projects (repos) that have workspaces
 _ws_list_all_projects() {
     if [[ ! -d "$WORKSPACE_PATH" ]]; then
@@ -285,6 +446,12 @@ Usage:
   ws -c, --clean            Delete workspaces without any changes
   ws -h, --help             Show this help message
 
+Sandbox:
+  claude-sandbox [dir]      Run claude in an isolated sandbox (default: current dir)
+  shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
+  wsc <name>                Enter workspace and start sandboxed claude
+  wss <name>                Enter workspace and start sandboxed shell
+
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
 
@@ -295,6 +462,16 @@ The <project>/<workspace> syntax allows you to enter workspaces from any directo
 even when not in a git repository. The project name is the repository directory name.
 
 Use 'popd' to return to the previous directory after entering a workspace.
+
+Sandbox Details:
+  The claude-sandbox command runs claude inside a bubblewrap container with:
+  - Full network access
+  - Read-write access to the specified directory and ~/.claude
+  - Read-only access to /nix (for nix run/develop)
+  - Read-only access to ~/.local/bin and ~/.local/lib (for MCP servers)
+  - Process isolation (cannot see/signal other processes)
+  - No access to SSH keys, GPG keys, or other sensitive files
+  - If .envrc exists, the direnv environment is loaded before entering
 EOF
 }
 
@@ -372,9 +549,79 @@ _ws_completions() {
     fi
 }
 
+# Completion function for wsc (bash) - like ws but only workspace names
+_wsc_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local git_root
+    git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+    local suggestions=()
+    local has_project_suggestions=0
+
+    # Check if input contains a slash (project/workspace syntax)
+    if [[ "$cur" == */* ]]; then
+        local project_prefix="${cur%%/*}"
+        local workspace_prefix="${cur#*/}"
+        local project_workspace_dir="$WORKSPACE_PATH/$project_prefix"
+
+        if [[ -d "$project_workspace_dir" ]]; then
+            for ws_dir in "$project_workspace_dir"/*/; do
+                if [[ -d "$ws_dir" ]]; then
+                    local ws_name=$(basename "$ws_dir")
+                    suggestions+=("$project_prefix/$ws_name")
+                fi
+            done
+        fi
+    elif [[ -z "$git_root" ]]; then
+        # Not in a git repo - suggest all projects
+        if [[ -d "$WORKSPACE_PATH" ]]; then
+            for project_dir in "$WORKSPACE_PATH"/*/; do
+                if [[ -d "$project_dir" ]]; then
+                    local project_name=$(basename "$project_dir")
+                    suggestions+=("$project_name/")
+                    has_project_suggestions=1
+                fi
+            done
+        fi
+        suggestions+=("--help")
+    else
+        # In a git repo - suggest workspaces from current repo
+        local repo_name=$(basename "$git_root")
+        local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
+
+        if [[ -d "$repo_workspace_dir" ]]; then
+            for ws_dir in "$repo_workspace_dir"/*/; do
+                if [[ -d "$ws_dir" ]]; then
+                    suggestions+=("$(basename "$ws_dir")")
+                fi
+            done
+        fi
+
+        # Also suggest all projects
+        if [[ -d "$WORKSPACE_PATH" ]]; then
+            for project_dir in "$WORKSPACE_PATH"/*/; do
+                if [[ -d "$project_dir" ]]; then
+                    local project_name=$(basename "$project_dir")
+                    suggestions+=("$project_name/")
+                    has_project_suggestions=1
+                fi
+            done
+        fi
+        suggestions+=("--help")
+    fi
+
+    COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
+
+    if [[ $has_project_suggestions -eq 1 ]]; then
+        compopt -o nospace 2>/dev/null
+    fi
+}
+
 # Register bash completion
 if [[ -n "$BASH_VERSION" ]]; then
     complete -F _ws_completions ws
+    complete -F _wsc_completions wsc
+    complete -F _wsc_completions wss
 fi
 
 # Completion function for zsh
@@ -457,4 +704,68 @@ if [[ -n "$ZSH_VERSION" ]]; then
     }
 
     compdef _ws_zsh_completions ws
+
+    # Completion function for wsc (zsh) - like ws but only workspace names
+    _wsc_zsh_completions() {
+        local git_root
+        git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+        local -a workspaces projects options
+        local cur="${words[CURRENT]}"
+
+        if [[ "$cur" == */* ]]; then
+            local project_prefix="${cur%%/*}"
+            local workspace_prefix="${cur#*/}"
+            local project_workspace_dir="$WORKSPACE_PATH/$project_prefix"
+
+            if [[ -d "$project_workspace_dir" ]]; then
+                for ws_dir in "$project_workspace_dir"/*/; do
+                    if [[ -d "$ws_dir" ]]; then
+                        local ws_name=$(basename "$ws_dir")
+                        workspaces+=("$project_prefix/$ws_name")
+                    fi
+                done
+            fi
+            compadd -a workspaces
+        elif [[ -z "$git_root" ]]; then
+            if [[ -d "$WORKSPACE_PATH" ]]; then
+                for project_dir in "$WORKSPACE_PATH"/*/; do
+                    if [[ -d "$project_dir" ]]; then
+                        local project_name=$(basename "$project_dir")
+                        projects+=("$project_name/")
+                    fi
+                done
+            fi
+            options=("--help")
+            compadd -S '' -a projects
+            compadd -a options
+        else
+            local repo_name=$(basename "$git_root")
+            local repo_workspace_dir="$WORKSPACE_PATH/$repo_name"
+
+            if [[ -d "$repo_workspace_dir" ]]; then
+                for ws_dir in "$repo_workspace_dir"/*/; do
+                    if [[ -d "$ws_dir" ]]; then
+                        workspaces+=("$(basename "$ws_dir")")
+                    fi
+                done
+            fi
+
+            if [[ -d "$WORKSPACE_PATH" ]]; then
+                for project_dir in "$WORKSPACE_PATH"/*/; do
+                    if [[ -d "$project_dir" ]]; then
+                        local project_name=$(basename "$project_dir")
+                        projects+=("$project_name/")
+                    fi
+                done
+            fi
+            options=("--help")
+            compadd -a workspaces
+            compadd -S '' -a projects
+            compadd -a options
+        fi
+    }
+
+    compdef _wsc_zsh_completions wsc
+    compdef _wsc_zsh_completions wss
 fi
