@@ -211,9 +211,10 @@ _ws_run_sandboxed() {
         --ro-bind /run/current-system /run/current-system
         # Nix daemon socket for nix commands inside sandbox
         --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
-        # Device and proc filesystems
+        # Device, proc, and sys filesystems
         --dev /dev
         --proc /proc
+        --ro-bind /sys /sys
         # Tmpfs for temp files and fake home
         --tmpfs /tmp
         --tmpfs "$HOME"
