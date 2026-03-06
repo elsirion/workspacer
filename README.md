@@ -31,6 +31,9 @@ rv 123
 # Review GitHub PR #123 from anywhere by specifying project name
 rv myrepo 123
 
+# Start Codex in a workspace without approval prompts
+wsx my-feature
+
 # Return to previous directory
 popd
 ```
@@ -72,7 +75,7 @@ $WORKSPACER_CONFIG_DIR/
 └── home_cow/
 ```
 
-- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `rv`, `claude-sandbox`, `shell-sandbox`).
+- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `wsx`, `rv`, `claude-sandbox`, `shell-sandbox`).
 - `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
 - `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
 - `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.

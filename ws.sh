@@ -405,6 +405,8 @@ _ws_run_sandboxed() {
         # Provide /usr/bin for shebangs like #!/usr/bin/env
         --dir /usr
         --symlink /run/current-system/sw/bin /usr/bin
+        # Provide /usr/share for shell completion scripts (e.g. gpg)
+        --symlink /run/current-system/sw/share /usr/share
         # Nix daemon socket for nix commands inside sandbox
         --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
         # Device, proc, and sys filesystems
@@ -448,6 +450,16 @@ _ws_run_sandboxed() {
     if [[ -d /etc/static ]]; then
         bwrap_args+=(--ro-bind /etc/static /etc/static)
     fi
+
+    # Mount shell startup files from /etc so bash-completion and profile
+    # initialization behave like the host shell.
+    local etc_shell_files=(/etc/bashrc /etc/profile /etc/bashrc.local /etc/profile.local /etc/inputrc)
+    local etc_file
+    for etc_file in "${etc_shell_files[@]}"; do
+        if [[ -f "$etc_file" ]]; then
+            bwrap_args+=(--ro-bind "$etc_file" "$etc_file")
+        fi
+    done
 
     # Load environment from config env file.
     if [[ -f "$env_file" ]]; then
@@ -536,6 +548,23 @@ wss() {
     fi
 
     _ws_enter_and_sandbox "$1" bash
+}
+
+# Enter workspace and start sandboxed codex without approval prompts
+wsx() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        echo "wsx - Enter workspace and start sandboxed codex (no approval prompts)"
+        echo ""
+        echo "Usage: wsx <name>  or  wsx <project>/<workspace>"
+        return 0
+    fi
+
+    if ! command -v codex &>/dev/null; then
+        echo "Error: codex is not installed" >&2
+        return 1
+    fi
+
+    _ws_enter_and_sandbox "$1" codex -a never
 }
 
 # Review a pull request in an isolated workspace with claude
@@ -751,6 +780,7 @@ Sandbox:
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
   wss <name>                Enter workspace and start sandboxed shell
+  wsx <name>                Enter workspace and start sandboxed codex (-a never)
   rv <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
   rv <project> <pr-number>  Review a GitHub PR outside a repo by project name
 
@@ -949,6 +979,7 @@ if [[ -n "$BASH_VERSION" ]]; then
     complete -F _ws_completions ws
     complete -F _wsc_completions wsc
     complete -F _wsc_completions wss
+    complete -F _wsc_completions wsx
     complete -F _rv_completions rv
 fi
 
@@ -1096,6 +1127,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
 
     compdef _wsc_zsh_completions wsc
     compdef _wsc_zsh_completions wss
+    compdef _wsc_zsh_completions wsx
 
     _rv_zsh_completions() {
         local -a projects options
