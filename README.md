@@ -25,12 +25,18 @@ ws -c
 ws --help
 ws -h
 
-# Review GitHub PR #123 in an isolated workspace with Claude
+# Review GitHub PR #123 in an isolated workspace with Claude (inside repo)
 rv 123
+
+# Review GitHub PR #123 from anywhere by specifying project name
+rv myrepo 123
 
 # Return to previous directory
 popd
 ```
+
+For `rv <project> <pr>`, the project must already exist under `$WORKSPACE_PATH`
+(for example from a prior `ws` workspace in that repo).
 
 ## Configuration
 

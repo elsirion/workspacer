@@ -5,6 +5,73 @@
 # Default workspace path follows XDG Base Directory Specification
 : "${WORKSPACE_PATH:=${XDG_DATA_HOME:-$HOME/.local/share}/workspaces}"
 
+# Internal: get the main worktree path for a git repository path.
+_ws_get_worktree_main_repo() {
+    local repo_path="$1"
+    local main_repo
+
+    main_repo=$(git -C "$repo_path" worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
+    if [[ -z "$main_repo" ]]; then
+        main_repo="$repo_path"
+    fi
+
+    if [[ -d "$main_repo" ]]; then
+        (cd "$main_repo" && pwd -P)
+    fi
+}
+
+# Internal: store the project's main repo path for faster future resolution.
+_ws_set_project_root_link() {
+    local repo_name="$1"
+    local main_repo_path="$2"
+
+    if [[ -z "$repo_name" || -z "$main_repo_path" || ! -d "$main_repo_path" ]]; then
+        return
+    fi
+
+    mkdir -p "$WORKSPACE_PATH/$repo_name"
+    ln -sfn "$main_repo_path" "$WORKSPACE_PATH/$repo_name/.root"
+}
+
+# Internal: resolve a project's main repo path from .root or existing workspaces.
+_ws_get_main_repo_for_project() {
+    local repo_name="$1"
+    local project_workspace_dir="$WORKSPACE_PATH/$repo_name"
+    local root_link="$project_workspace_dir/.root"
+
+    # Fast path: project root link.
+    if [[ -e "$root_link" ]]; then
+        local linked_repo
+        linked_repo=$(cd "$root_link" 2>/dev/null && pwd -P)
+        if [[ -n "$linked_repo" ]] && git -C "$linked_repo" rev-parse --is-inside-work-tree &>/dev/null; then
+            echo "$linked_repo"
+            return 0
+        fi
+    fi
+
+    # Fallback: scan existing workspaces.
+    if [[ -d "$project_workspace_dir" ]]; then
+        for ws_dir in "$project_workspace_dir"/*/; do
+            if [[ ! -d "$ws_dir" ]]; then
+                continue
+            fi
+            if ! git -C "$ws_dir" rev-parse --is-inside-work-tree &>/dev/null; then
+                continue
+            fi
+
+            local main_repo
+            main_repo=$(_ws_get_worktree_main_repo "$ws_dir")
+            if [[ -n "$main_repo" ]]; then
+                _ws_set_project_root_link "$repo_name" "$main_repo"
+                echo "$main_repo"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
 ws() {
     local workspace_arg="$1"
 
@@ -65,8 +132,12 @@ ws() {
             return 1
         fi
 
-        # Check if this project has any workspaces
-        if [[ ! -d "$WORKSPACE_PATH/$repo_name" ]]; then
+        # Check if this project has any workspaces unless it is the current repo
+        local current_repo_name=""
+        if [[ -n "$git_root" ]]; then
+            current_repo_name=$(basename "$git_root")
+        fi
+        if [[ ! -d "$WORKSPACE_PATH/$repo_name" ]] && [[ "$current_repo_name" != "$repo_name" ]]; then
             echo "Error: No workspaces found for project '$repo_name'" >&2
             echo "Available projects:" >&2
             _ws_list_all_projects >&2
@@ -86,27 +157,17 @@ ws() {
 
     # Workspace directory path
     local workspace_dir="$WORKSPACE_PATH/$repo_name/$workspace_name"
+    local temp_branch=""
 
     # Find the main repository for this project
     local main_repo_path=""
     if [[ -n "$git_root" ]] && [[ "$(basename "$git_root")" == "$repo_name" ]]; then
         # We're in the correct git repo
-        main_repo_path=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
-        if [[ -z "$main_repo_path" ]]; then
-            main_repo_path="$git_root"
-        fi
+        main_repo_path=$(_ws_get_worktree_main_repo "$git_root")
+        _ws_set_project_root_link "$repo_name" "$main_repo_path"
     else
-        # Try to find an existing workspace for this project to get the main repo
-        if [[ -d "$WORKSPACE_PATH/$repo_name" ]]; then
-            for ws_dir in "$WORKSPACE_PATH/$repo_name"/*/; do
-                if [[ -d "$ws_dir/.git" ]] || [[ -f "$ws_dir/.git" ]]; then
-                    main_repo_path=$(git -C "$ws_dir" worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
-                    if [[ -n "$main_repo_path" ]]; then
-                        break
-                    fi
-                fi
-            done
-        fi
+        # Resolve from project's .root link or existing workspaces.
+        main_repo_path=$(_ws_get_main_repo_for_project "$repo_name")
     fi
 
     # Create workspace if it doesn't exist
@@ -118,9 +179,9 @@ ws() {
 
         # Clone/worktree the repository
         # Use git worktree for efficiency (shares .git objects)
-        if [[ -n "$main_repo_path" ]] && git -C "$main_repo_path" worktree add "$workspace_dir" -b "_ws_temp_$$" 2>/dev/null; then
-            # Remove the temporary branch, we'll create the proper one later
-            git -C "$workspace_dir" branch -D "_ws_temp_$$" 2>/dev/null || true
+        temp_branch="_ws_temp_${$}_$(date +%s%N)"
+        if [[ -n "$main_repo_path" ]] && git -C "$main_repo_path" worktree add "$workspace_dir" -b "$temp_branch" 2>/dev/null; then
+            _ws_set_project_root_link "$repo_name" "$main_repo_path"
         else
             echo "Error: Cannot create workspace. No main repository found for project '$repo_name'" >&2
             echo "Hint: Create the first workspace while in the git repository" >&2
@@ -152,6 +213,11 @@ ws() {
         fi
     else
         echo "Already on branch: $branch_name"
+    fi
+
+    # Temporary worktree branch is no longer needed after switching.
+    if [[ -n "$temp_branch" ]]; then
+        git -C "$workspace_dir" branch -D "$temp_branch" 2>/dev/null || true
     fi
 
     # Allow and enter direnv if .envrc exists
@@ -378,31 +444,59 @@ rv() {
         cat <<'EOF'
 rv - Review a GitHub pull request in an isolated workspace
 
-Usage: rv <pr-number>
+Usage:
+  rv <pr-number>
+  rv <project> <pr-number>
 
 Creates/enters workspace pr-<pr-number>-review, checks out the PR branch
 with gh, then launches claude in interactive sandboxed mode with a review prompt.
+
+When run outside a git repo, pass project name first (repository directory name).
 EOF
         return 0
     fi
 
-    local pr_number="$1"
-    if [[ -z "$pr_number" ]]; then
-        echo "Error: PR number required" >&2
-        echo "Usage: rv <pr-number>" >&2
-        return 1
-    fi
+    local project_name=""
+    local pr_number=""
+    case "$#" in
+        1)
+            pr_number="$1"
+            ;;
+        2)
+            project_name="$1"
+            pr_number="$2"
+            ;;
+        *)
+            echo "Error: Invalid arguments" >&2
+            echo "Usage: rv <pr-number>  or  rv <project> <pr-number>" >&2
+            return 1
+            ;;
+    esac
 
     if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
         echo "Error: PR number must be numeric" >&2
         return 1
     fi
 
-    local git_root
+    local git_root main_repo repo_name
     git_root=$(git rev-parse --show-toplevel 2>/dev/null)
-    if [[ -z "$git_root" ]]; then
-        echo "Error: rv must be run inside a git repository" >&2
-        return 1
+
+    if [[ -n "$project_name" ]]; then
+        repo_name="$project_name"
+        main_repo=$(_ws_get_main_repo_for_project "$repo_name")
+        if [[ -z "$main_repo" ]]; then
+            echo "Error: Could not find main repository path for project '$repo_name'" >&2
+            echo "Hint: Ensure at least one workspace exists under $WORKSPACE_PATH/$repo_name" >&2
+            return 1
+        fi
+    else
+        if [[ -z "$git_root" ]]; then
+            echo "Error: Outside a git repo, use: rv <project> <pr-number>" >&2
+            return 1
+        fi
+        main_repo=$(_ws_get_worktree_main_repo "$git_root")
+        repo_name=$(basename "$main_repo")
+        _ws_set_project_root_link "$repo_name" "$main_repo"
     fi
 
     if ! command -v gh &>/dev/null; then
@@ -415,18 +509,14 @@ EOF
         return 1
     fi
 
-    local main_repo
-    main_repo=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
-    if [[ -z "$main_repo" ]]; then
-        main_repo="$git_root"
-    fi
-
-    local repo_name
-    repo_name=$(basename "$main_repo")
     local workspace_name="pr-${pr_number}-review"
 
     # Enter/create a dedicated review workspace.
-    ws "${repo_name}/${workspace_name}" || return 1
+    if [[ -z "$project_name" ]]; then
+        ws "$workspace_name" || return 1
+    else
+        ws "${repo_name}/${workspace_name}" || return 1
+    fi
 
     echo "Checking out PR #$pr_number..."
     if ! gh pr checkout "$pr_number"; then
@@ -561,7 +651,8 @@ Sandbox:
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
   wss <name>                Enter workspace and start sandboxed shell
-  rv <pr-number>            Review a GitHub PR in an isolated workspace
+  rv <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
+  rv <project> <pr-number>  Review a GitHub PR outside a repo by project name
 
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
@@ -732,7 +823,23 @@ _wsc_completions() {
 # Completion function for rv (bash)
 _rv_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    COMPREPLY=($(compgen -W "--help" -- "$cur"))
+    local suggestions=()
+
+    if [[ "$COMP_CWORD" -eq 1 ]]; then
+        if [[ -d "$WORKSPACE_PATH" ]]; then
+            for project_dir in "$WORKSPACE_PATH"/*/; do
+                if [[ -d "$project_dir" ]]; then
+                    suggestions+=("$(basename "$project_dir")")
+                fi
+            done
+        fi
+        suggestions+=("--help")
+    elif [[ "$COMP_CWORD" -eq 2 ]]; then
+        # Second argument is PR number when first arg is a project name.
+        suggestions=()
+    fi
+
+    COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
 }
 
 # Register bash completion
@@ -889,9 +996,23 @@ if [[ -n "$ZSH_VERSION" ]]; then
     compdef _wsc_zsh_completions wss
 
     _rv_zsh_completions() {
-        local -a options
-        options=("--help")
-        compadd -a options
+        local -a projects options
+
+        if [[ "$CURRENT" -eq 2 ]]; then
+            if [[ -d "$WORKSPACE_PATH" ]]; then
+                for project_dir in "$WORKSPACE_PATH"/*/; do
+                    if [[ -d "$project_dir" ]]; then
+                        projects+=("$(basename "$project_dir")")
+                    fi
+                done
+            fi
+            options=("--help")
+            compadd -a projects
+            compadd -a options
+        elif [[ "$CURRENT" -eq 3 ]]; then
+            # Second argument is PR number.
+            return
+        fi
     }
 
     compdef _rv_zsh_completions rv
