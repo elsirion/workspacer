@@ -402,6 +402,9 @@ _ws_run_sandboxed() {
         --ro-bind /etc/group /etc/group
         # NixOS-specific paths
         --ro-bind /run/current-system /run/current-system
+        # Provide /usr/bin for shebangs like #!/usr/bin/env
+        --dir /usr
+        --symlink /run/current-system/sw/bin /usr/bin
         # Nix daemon socket for nix commands inside sandbox
         --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
         # Device, proc, and sys filesystems
