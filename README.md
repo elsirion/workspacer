@@ -46,6 +46,7 @@ Set a custom workspace path (default: `~/.local/share/workspaces`):
 programs.workspacer = {
   enable = true;
   workspacePath = "$HOME/workspaces";
+  configDir = "$HOME/.config/workspacer";
 };
 ```
 
@@ -54,6 +55,27 @@ Or via environment variable:
 ```bash
 export WORKSPACE_PATH="$HOME/workspaces"
 ```
+
+Set a custom sandbox config directory (default: `~/.config/workspacer`):
+
+```bash
+export WORKSPACER_CONFIG_DIR="$HOME/.config/workspacer"
+```
+
+Sandbox home/config layout:
+
+```text
+$WORKSPACER_CONFIG_DIR/
+├── env
+├── home_ro/
+├── home_rw/
+└── home_cow/
+```
+
+- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `rv`, `claude-sandbox`, `shell-sandbox`).
+- `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
+- `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
+- `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.
 
 ## Directory Structure
 

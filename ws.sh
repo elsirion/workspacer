@@ -4,6 +4,8 @@
 
 # Default workspace path follows XDG Base Directory Specification
 : "${WORKSPACE_PATH:=${XDG_DATA_HOME:-$HOME/.local/share}/workspaces}"
+# Sandbox config directory
+: "${WORKSPACER_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/workspacer}"
 
 # Internal: get the main worktree path for a git repository path.
 _ws_get_worktree_main_repo() {
@@ -70,6 +72,121 @@ _ws_get_main_repo_for_project() {
     fi
 
     return 1
+}
+
+# Internal: add environment variables from dotenv-like file to sandbox args.
+_ws_add_env_file_to_bwrap_args() {
+    local env_file="$1"
+    [[ -f "$env_file" ]] || return 0
+
+    local raw_line line key value
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        line="$raw_line"
+        # Trim whitespace.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == export[[:space:]]* ]] && line="${line#export }"
+
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            value="${value#"${value%%[![:space:]]*}"}"
+
+            # Strip symmetric single/double quotes.
+            if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            fi
+
+            bwrap_args+=(--setenv "$key" "$value")
+        else
+            echo "Warning: Ignoring invalid env line: $raw_line" >&2
+        fi
+    done < "$env_file"
+}
+
+# Internal: add binds from config dir into sandbox home.
+_ws_add_home_mounts_to_bwrap_args() {
+    local mode="$1"
+    local source_dir="$2"
+    local cow_staging_root="$3"
+    [[ -d "$source_dir" ]] || return 0
+
+    local entry rel_path target_path bind_source staged_path
+    while IFS= read -r -d '' entry; do
+        rel_path="${entry#$source_dir/}"
+        [[ -n "$rel_path" ]] || continue
+
+        # If a real directory has nested entries in config, treat children as
+        # mount points and skip mounting the container directory itself.
+        if [[ -d "$entry" && ! -L "$entry" ]] && \
+            find "$entry" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            continue
+        fi
+
+        target_path="$HOME/$rel_path"
+        bind_source="$entry"
+
+        _ws_add_parent_dirs_to_bwrap_args "$target_path"
+
+        case "$mode" in
+            ro)
+                bwrap_args+=(--ro-bind "$bind_source" "$target_path")
+                ;;
+            rw)
+                bwrap_args+=(--bind "$bind_source" "$target_path")
+                ;;
+            cow)
+                if [[ -z "$cow_staging_root" ]]; then
+                    echo "Error: Missing COW staging directory" >&2
+                    return 1
+                fi
+                staged_path="$cow_staging_root/$rel_path"
+                mkdir -p "$(dirname "$staged_path")"
+                if ! cp -RLp "$entry" "$staged_path"; then
+                    echo "Error: Failed to copy '$entry' for COW mount" >&2
+                    return 1
+                fi
+                bwrap_args+=(--bind "$staged_path" "$target_path")
+                ;;
+            *)
+                echo "Error: Unknown mount mode '$mode'" >&2
+                return 1
+                ;;
+        esac
+    done < <(find "$source_dir" -mindepth 1 -print0)
+}
+
+# Internal: add a bwrap --dir argument once for each required directory.
+_ws_add_bwrap_dir_if_missing() {
+    local dir_path="$1"
+    [[ -z "$dir_path" || "$dir_path" == "." || "$dir_path" == "/" ]] && return 0
+
+    if [[ "$_ws_bwrap_dir_index" != *"|$dir_path|"* ]]; then
+        bwrap_args+=(--dir "$dir_path")
+        _ws_bwrap_dir_index="${_ws_bwrap_dir_index}${dir_path}|"
+    fi
+}
+
+# Internal: ensure target parent directories exist inside the bwrap home tmpfs.
+_ws_add_parent_dirs_to_bwrap_args() {
+    local target_path="$1"
+    local parent_path
+    parent_path="$(dirname "$target_path")"
+
+    local -a parent_stack=()
+    while [[ "$parent_path" != "$HOME" && "$parent_path" != "/" ]]; do
+        parent_stack=("$parent_path" "${parent_stack[@]}")
+        parent_path="$(dirname "$parent_path")"
+    done
+
+    local dir_path
+    for dir_path in "${parent_stack[@]}"; do
+        _ws_add_bwrap_dir_if_missing "$dir_path"
+    done
 }
 
 ws() {
@@ -255,8 +372,18 @@ _ws_run_sandboxed() {
         return 1
     fi
 
+    local config_dir="$WORKSPACER_CONFIG_DIR"
+    local env_file="$config_dir/env"
+    local home_ro_dir="$config_dir/home_ro"
+    local home_rw_dir="$config_dir/home_rw"
+    local home_cow_dir="$config_dir/home_cow"
+    local cow_staging_root=""
+    local _ws_bwrap_dir_index="|$HOME|"
+    local status=0
+
     echo "Starting sandbox in: $workdir"
-    echo "  - Filesystem: $workdir + ~/.claude are writable"
+    echo "  - Filesystem: $workdir is writable"
+    echo "  - Home mounts: from $config_dir/{home_ro,home_rw,home_cow}"
     echo "  - Network: full access"
     echo "  - Processes: isolated"
 
@@ -292,30 +419,6 @@ _ws_run_sandboxed() {
         --setenv HOME "$HOME"
     )
 
-    # Mount git config and any included config files (read-only)
-    if [[ -f "$HOME/.gitconfig" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
-        # Parse includeIf paths and mount them too
-        local inc_path
-        while read -r _ inc_path; do
-            # Expand ~ to $HOME
-            inc_path="${inc_path/#\~/$HOME}"
-            if [[ -f "$inc_path" ]]; then
-                bwrap_args+=(--ro-bind "$inc_path" "$inc_path")
-            fi
-        done < <(git config --global --get-regexp 'includeIf\..*\.path' 2>/dev/null)
-    fi
-
-    # Mount GPG keyring (read-only) and agent socket for commit signing
-    if [[ -d "$HOME/.gnupg" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.gnupg" "$HOME/.gnupg")
-    fi
-    local gpg_socket_dir
-    gpg_socket_dir="$(gpgconf --list-dirs socketdir 2>/dev/null)"
-    if [[ -n "$gpg_socket_dir" && -d "$gpg_socket_dir" ]]; then
-        bwrap_args+=(--ro-bind "$gpg_socket_dir" "$gpg_socket_dir")
-    fi
-
     # If workdir is a git worktree, mount the main repo's .git directory
     # Worktrees have a .git file (not directory) pointing to .git/worktrees/<name>
     if [[ -f "$workdir/.git" ]]; then
@@ -327,49 +430,43 @@ _ws_run_sandboxed() {
         fi
     fi
 
-    # Mount Claude config directory if it exists (read-write for session state)
-    if [[ -d "$HOME/.claude" ]]; then
-        bwrap_args+=(--bind "$HOME/.claude" "$HOME/.claude")
+    # Home mounts are defined declaratively in WORKSPACER_CONFIG_DIR.
+    if [[ -d "$home_cow_dir" ]]; then
+        cow_staging_root="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-home-cow.XXXXXX")"
     fi
-
-    # Mount ~/.claude.json if it exists (contains MCP server config)
-    if [[ -f "$HOME/.claude.json" ]]; then
-        bwrap_args+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
+    if ! _ws_add_home_mounts_to_bwrap_args ro "$home_ro_dir" "$cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args rw "$home_rw_dir" "$cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args cow "$home_cow_dir" "$cow_staging_root"; then
+        [[ -n "$cow_staging_root" ]] && rm -rf "$cow_staging_root"
+        return 1
     fi
-
-    # Mount ~/.config/claude if it exists
-    if [[ -d "$HOME/.config/claude" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.config/claude" "$HOME/.config/claude")
-    fi
-
-    # Mount ~/.local for MCP servers (e.g., playwright) and user-installed tools
-    if [[ -d "$HOME/.local/bin" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.local/bin" "$HOME/.local/bin")
-    fi
-    if [[ -d "$HOME/.local/lib" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.local/lib" "$HOME/.local/lib")
-    fi
-
-    # Mount shell config files read-only so the user's shell environment works
-    local shell_configs=(.bashrc .bash_profile .profile .zshrc .zprofile .zshenv .inputrc)
-    for cfg in "${shell_configs[@]}"; do
-        if [[ -f "$HOME/$cfg" ]]; then
-            bwrap_args+=(--ro-bind "$HOME/$cfg" "$HOME/$cfg")
-        fi
-    done
 
     # Add /etc/static if it exists (NixOS)
     if [[ -d /etc/static ]]; then
         bwrap_args+=(--ro-bind /etc/static /etc/static)
     fi
 
+    # Load environment from config env file.
+    if [[ -f "$env_file" ]]; then
+        echo "  - Environment: loaded from $env_file"
+        _ws_add_env_file_to_bwrap_args "$env_file"
+    fi
+
     # Run with direnv environment if available
     if command -v direnv &>/dev/null && [[ -f "$workdir/.envrc" ]]; then
         echo "  - Environment: loaded from .envrc"
         direnv exec "$workdir" bwrap "${bwrap_args[@]}" "${cmd[@]}"
+        status=$?
     else
         bwrap "${bwrap_args[@]}" "${cmd[@]}"
+        status=$?
     fi
+
+    if [[ -n "$cow_staging_root" ]]; then
+        rm -rf "$cow_staging_root"
+    fi
+
+    return "$status"
 }
 
 # Run claude in a sandboxed environment
@@ -668,12 +765,14 @@ Use 'popd' to return to the previous directory after entering a workspace.
 Sandbox Details:
   The claude-sandbox command runs claude inside a bubblewrap container with:
   - Full network access
-  - Read-write access to the specified directory and ~/.claude
+  - Read-write access to the specified working directory
   - Read-only access to /nix (for nix run/develop)
-  - Read-only access to ~/.local/bin and ~/.local/lib (for MCP servers)
+  - Home mounts from WORKSPACER_CONFIG_DIR (default: ~/.config/workspacer):
+    env       -> KEY=VALUE variables loaded into sandbox environment
+    home_ro/  -> each entry path bind mounted to ~/path read-only
+    home_rw/  -> each entry path bind mounted to ~/path read-write
+    home_cow/ -> each entry path copied then bind mounted to ~/path read-write
   - Process isolation (cannot see/signal other processes)
-  - No access to SSH keys or other sensitive files
-  - GPG signing works via agent forwarding (keys stay outside sandbox)
   - If .envrc exists, the direnv environment is loaded before entering
 EOF
 }

@@ -53,6 +53,13 @@
               description = "Custom workspace path. Defaults to $XDG_DATA_HOME/workspaces";
               example = "$HOME/workspaces";
             };
+
+            configDir = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Custom sandbox config path. Defaults to $XDG_CONFIG_HOME/workspacer";
+              example = "$HOME/.config/workspacer";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -60,12 +67,18 @@
               ${lib.optionalString (cfg.workspacePath != null) ''
                 export WORKSPACE_PATH="${cfg.workspacePath}"
               ''}
+              ${lib.optionalString (cfg.configDir != null) ''
+                export WORKSPACER_CONFIG_DIR="${cfg.configDir}"
+              ''}
               source "${workspacerPkg}/share/workspacer/ws.sh"
             '';
 
             programs.zsh.interactiveShellInit = ''
               ${lib.optionalString (cfg.workspacePath != null) ''
                 export WORKSPACE_PATH="${cfg.workspacePath}"
+              ''}
+              ${lib.optionalString (cfg.configDir != null) ''
+                export WORKSPACER_CONFIG_DIR="${cfg.configDir}"
               ''}
               source "${workspacerPkg}/share/workspacer/ws.sh"
             '';
