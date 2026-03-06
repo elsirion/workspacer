@@ -372,6 +372,72 @@ wss() {
     _ws_enter_and_sandbox "$1" bash
 }
 
+# Review a pull request in an isolated workspace with claude
+rv() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        cat <<'EOF'
+rv - Review a GitHub pull request in an isolated workspace
+
+Usage: rv <pr-number>
+
+Creates/enters workspace pr-<pr-number>-review, checks out the PR branch
+with gh, then launches claude in interactive sandboxed mode with a review prompt.
+EOF
+        return 0
+    fi
+
+    local pr_number="$1"
+    if [[ -z "$pr_number" ]]; then
+        echo "Error: PR number required" >&2
+        echo "Usage: rv <pr-number>" >&2
+        return 1
+    fi
+
+    if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+        echo "Error: PR number must be numeric" >&2
+        return 1
+    fi
+
+    local git_root
+    git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ -z "$git_root" ]]; then
+        echo "Error: rv must be run inside a git repository" >&2
+        return 1
+    fi
+
+    if ! command -v gh &>/dev/null; then
+        echo "Error: gh (GitHub CLI) is not installed" >&2
+        return 1
+    fi
+
+    if ! command -v claude &>/dev/null; then
+        echo "Error: claude is not installed" >&2
+        return 1
+    fi
+
+    local main_repo
+    main_repo=$(git worktree list --porcelain 2>/dev/null | head -n1 | sed 's/^worktree //')
+    if [[ -z "$main_repo" ]]; then
+        main_repo="$git_root"
+    fi
+
+    local repo_name
+    repo_name=$(basename "$main_repo")
+    local workspace_name="pr-${pr_number}-review"
+
+    # Enter/create a dedicated review workspace.
+    ws "${repo_name}/${workspace_name}" || return 1
+
+    echo "Checking out PR #$pr_number..."
+    if ! gh pr checkout "$pr_number"; then
+        echo "Error: Failed to check out PR #$pr_number" >&2
+        return 1
+    fi
+
+    local review_prompt="Review pull request #${pr_number} in this repository. Start by checking changed files and commits, then report findings ordered by severity with file/line references."
+    _ws_run_sandboxed "$(pwd)" claude --dangerously-skip-permissions "$review_prompt"
+}
+
 # List all projects (repos) that have workspaces
 _ws_list_all_projects() {
     if [[ ! -d "$WORKSPACE_PATH" ]]; then
@@ -495,6 +561,7 @@ Sandbox:
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
   wss <name>                Enter workspace and start sandboxed shell
+  rv <pr-number>            Review a GitHub PR in an isolated workspace
 
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
@@ -662,11 +729,18 @@ _wsc_completions() {
     fi
 }
 
+# Completion function for rv (bash)
+_rv_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=($(compgen -W "--help" -- "$cur"))
+}
+
 # Register bash completion
 if [[ -n "$BASH_VERSION" ]]; then
     complete -F _ws_completions ws
     complete -F _wsc_completions wsc
     complete -F _wsc_completions wss
+    complete -F _rv_completions rv
 fi
 
 # Completion function for zsh
@@ -813,4 +887,12 @@ if [[ -n "$ZSH_VERSION" ]]; then
 
     compdef _wsc_zsh_completions wsc
     compdef _wsc_zsh_completions wss
+
+    _rv_zsh_completions() {
+        local -a options
+        options=("--help")
+        compadd -a options
+    }
+
+    compdef _rv_zsh_completions rv
 fi

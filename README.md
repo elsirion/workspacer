@@ -25,6 +25,9 @@ ws -c
 ws --help
 ws -h
 
+# Review GitHub PR #123 in an isolated workspace with Claude
+rv 123
+
 # Return to previous directory
 popd
 ```
