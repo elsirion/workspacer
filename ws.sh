@@ -402,6 +402,9 @@ _ws_run_sandboxed() {
         --ro-bind /etc/group /etc/group
         # NixOS-specific paths
         --ro-bind /run/current-system /run/current-system
+        # Provide /bin/sh for tools that expect it (e.g. GNU parallel, Perl open3)
+        --dir /bin
+        --symlink /run/current-system/sw/bin/bash /bin/sh
         # Provide /usr/bin for shebangs like #!/usr/bin/env
         --dir /usr
         --symlink /run/current-system/sw/bin /usr/bin
