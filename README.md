@@ -112,14 +112,20 @@ ln -sfn "$HOME/.claude.json" "$cfg/home_rw/.claude.json"
 ln -sfn "$HOME/.codex" "$cfg/home_rw/.codex"
 
 # Separate key material for sandbox only (recommended)
-mkdir -p "$cfg/home_rw/.gnupg" "$cfg/home_rw/.ssh"
-chmod 700 "$cfg/home_rw/.gnupg" "$cfg/home_rw/.ssh"
+mkdir -p "$cfg/sandbox-ssh" "$cfg/home_rw/.gnupg"
+chmod 700 "$cfg/sandbox-ssh" "$cfg/home_rw/.gnupg"
+ln -sfn "$cfg/sandbox-ssh" "$cfg/home_rw/.ssh"
+
+# Separate GitHub CLI auth for sandbox
+mkdir -p "$cfg/sandbox-gh"
+ln -sfn "$cfg/sandbox-gh" "$cfg/home_rw/.config/gh"
 ```
 
 Notes:
 - Nested paths are supported. For example, `home_ro/.local/bin` mounts to `~/.local/bin`.
 - Prefer mounting specific subpaths instead of whole trees (for example `.local/bin` and `.local/lib`, not all of `.local`).
 - `home_cow` is useful when tools need writable configs but you do not want changes to persist.
+- Directories with children are mounted entry-by-entry, not as a whole. If a tool creates new files in a mounted directory (e.g. `gh auth login` creating `~/.config/gh/hosts.yml`), those files land on the tmpfs and are lost on exit. To mount an entire directory as one unit, use a **symlink trick**: place the real directory outside the mount tree and create a symlink to it inside `home_rw/`. Symlinks are treated as leaf entries and bind-mount the target directory as a whole.
 
 ## Directory Structure
 
