@@ -350,6 +350,70 @@ ws() {
     return 0
 }
 
+# Internal: Parse env file into an array of KEY=VALUE strings.
+# Usage: _ws_parse_env_file <env_file> <array_name>
+_ws_parse_env_file() {
+    local env_file="$1"
+    local -n _env_arr="$2"
+    [[ -f "$env_file" ]] || return 0
+
+    local raw_line line key value
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        line="$raw_line"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == export[[:space:]]* ]] && line="${line#export }"
+
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            value="${value#"${value%%[![:space:]]*}"}"
+
+            if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            fi
+
+            _env_arr+=("$key=$value")
+        else
+            echo "Warning: Ignoring invalid env line: $raw_line" >&2
+        fi
+    done < "$env_file"
+}
+
+# Internal: Resolve real paths from a home mount config directory.
+# Walks entries, resolves symlinks, outputs real paths (one per line).
+_ws_resolve_home_mount_real_paths() {
+    local source_dir="$1"
+    [[ -d "$source_dir" ]] || return 0
+
+    local entry rel_path real_path
+    while IFS= read -r -d '' entry; do
+        rel_path="${entry#$source_dir/}"
+        [[ -n "$rel_path" ]] || continue
+
+        # Skip non-leaf directories (same logic as bwrap mounts).
+        if [[ -d "$entry" && ! -L "$entry" ]] && \
+            find "$entry" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            continue
+        fi
+
+        # Resolve symlinks to get the real filesystem path.
+        if [[ -L "$entry" ]]; then
+            real_path="$(cd "$(dirname "$entry")" && realpath "$(readlink "$entry")" 2>/dev/null)"
+        else
+            real_path="$HOME/$rel_path"
+        fi
+
+        if [[ -n "$real_path" && -e "$real_path" ]]; then
+            echo "$real_path"
+        fi
+    done < <(find "$source_dir" -mindepth 1 -print0)
+}
+
 # Internal: Run a command in a sandboxed environment
 # Usage: _ws_run_sandboxed <workdir> <command> [args...]
 _ws_run_sandboxed() {
@@ -365,7 +429,29 @@ _ws_run_sandboxed() {
         return 1
     fi
 
-    # Check for bubblewrap
+    local os_type
+    os_type="$(uname -s)"
+
+    case "$os_type" in
+        Linux)
+            _ws_run_sandboxed_linux "$workdir" "${cmd[@]}"
+            ;;
+        Darwin)
+            _ws_run_sandboxed_darwin "$workdir" "${cmd[@]}"
+            ;;
+        *)
+            echo "Error: Unsupported OS '$os_type' for sandboxing" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Internal: Linux sandbox implementation using bubblewrap.
+_ws_run_sandboxed_linux() {
+    local workdir="$1"
+    shift
+    local cmd=("$@")
+
     if ! command -v bwrap &>/dev/null; then
         echo "Error: bubblewrap (bwrap) is not installed" >&2
         echo "Install it with: nix-shell -p bubblewrap" >&2
@@ -480,6 +566,139 @@ _ws_run_sandboxed() {
     if [[ -n "$cow_staging_root" ]]; then
         rm -rf "$cow_staging_root"
     fi
+
+    return "$status"
+}
+
+# Internal: macOS sandbox implementation using sandbox-exec.
+# Provides filesystem write restriction via Apple's sandbox profiles.
+# Limitations vs Linux bwrap: no process isolation, no tmpfs HOME,
+# home_cow degrades to home_rw (no bind mounts on macOS).
+_ws_run_sandboxed_darwin() {
+    local workdir="$1"
+    shift
+    local cmd=("$@")
+
+    if ! command -v sandbox-exec &>/dev/null; then
+        echo "Error: sandbox-exec is not available" >&2
+        return 1
+    fi
+
+    local config_dir="$WORKSPACER_CONFIG_DIR"
+    local env_file="$config_dir/env"
+    local home_ro_dir="$config_dir/home_ro"
+    local home_rw_dir="$config_dir/home_rw"
+    local home_cow_dir="$config_dir/home_cow"
+    local status=0
+
+    echo "Starting sandbox in: $workdir"
+    echo "  - Filesystem: $workdir is writable, writes denied elsewhere"
+    echo "  - Home config: from $config_dir/{home_ro,home_rw,home_cow}"
+    echo "  - Network: full access"
+    echo "  - Backend: sandbox-exec (macOS)"
+
+    # Collect writable paths for the sandbox profile.
+    local -a writable_paths=()
+    writable_paths+=("$workdir")
+
+    # Git worktree common dir needs write access.
+    if [[ -f "$workdir/.git" ]]; then
+        local git_common_dir
+        git_common_dir="$(git -C "$workdir" rev-parse --git-common-dir 2>/dev/null)"
+        if [[ -n "$git_common_dir" ]]; then
+            git_common_dir="$(cd "$workdir" && cd "$git_common_dir" && pwd)"
+            writable_paths+=("$git_common_dir")
+        fi
+    fi
+
+    # home_rw: resolve symlinks and allow writes to real paths.
+    if [[ -d "$home_rw_dir" ]]; then
+        local rw_path
+        while IFS= read -r rw_path; do
+            writable_paths+=("$rw_path")
+        done < <(_ws_resolve_home_mount_real_paths "$home_rw_dir")
+    fi
+
+    # home_cow: on macOS, degrades to rw (no bind mounts available).
+    if [[ -d "$home_cow_dir" ]]; then
+        echo "  - Note: home_cow entries treated as home_rw on macOS"
+        local cow_path
+        while IFS= read -r cow_path; do
+            writable_paths+=("$cow_path")
+        done < <(_ws_resolve_home_mount_real_paths "$home_cow_dir")
+    fi
+
+    # Build sandbox profile.
+    local profile
+    profile="$(cat <<'SBEOF'
+(version 1)
+(deny default)
+
+;; Allow reading everything (matches bwrap ro-bind approach).
+(allow file-read*)
+
+;; Allow process execution.
+(allow process-exec)
+(allow process-fork)
+(allow signal)
+
+;; Allow all network access.
+(allow network*)
+
+;; Allow sysctl reads (needed by many tools).
+(allow sysctl-read)
+
+;; Allow Mach IPC (needed for most macOS operations).
+(allow mach-lookup)
+(allow mach-register)
+(allow mach-task-name)
+
+;; Allow IOKit (needed for terminal, hardware info).
+(allow iokit-open)
+
+;; Allow writes to /dev (terminals, /dev/null, etc.).
+(allow file-write* (subpath "/dev"))
+
+;; Allow writes to temp directories.
+(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/private/var/folders"))
+
+;; Allow writes to Homebrew temp (used during installs/builds).
+(allow file-write* (subpath "/opt/homebrew/var"))
+
+SBEOF
+)"
+
+    # Add writable path rules.
+    local wp
+    for wp in "${writable_paths[@]}"; do
+        profile+=$'\n'"(allow file-write* (subpath \"$wp\"))"
+    done
+
+    # Collect environment variables from config env file.
+    local -a env_args=()
+    if [[ -f "$env_file" ]]; then
+        echo "  - Environment: loaded from $env_file"
+        _ws_parse_env_file "$env_file" env_args
+    fi
+
+    # Build the env command prefix.
+    local -a run_cmd=()
+    if command -v direnv &>/dev/null && [[ -f "$workdir/.envrc" ]]; then
+        echo "  - Environment: loaded from .envrc"
+        run_cmd+=(direnv exec "$workdir")
+    fi
+    run_cmd+=(sandbox-exec -p "$profile")
+    if [[ ${#env_args[@]} -gt 0 ]]; then
+        run_cmd+=(env "${env_args[@]}")
+    fi
+
+    # Use bash wrapper to cd into workdir before exec.
+    run_cmd+=(bash -c 'cd "$1" && shift && exec "$@"' _ "$workdir" "${cmd[@]}")
+
+    "${run_cmd[@]}"
+    status=$?
 
     return "$status"
 }
