@@ -224,6 +224,10 @@ ws() {
                 _ws_clean_workspaces
                 return $?
                 ;;
+            --recent|-r)
+                _ws_recent_workspaces "${2:-updated}" "${3:-}"
+                return $?
+                ;;
             --help|-h)
                 _ws_help
                 return 0
@@ -765,6 +769,77 @@ _ws_clean_workspaces() {
     rmdir "$repo_workspace_dir" 2>/dev/null || true
 }
 
+# List all workspaces across projects sorted by recent activity
+_ws_recent_workspaces() {
+    local mode="$1"
+    local filter_project="$2"
+
+    case "$mode" in
+        created|updated) ;;
+        *)
+            echo "Error: Invalid mode '$mode'. Use 'created' or 'updated'" >&2
+            return 1
+            ;;
+    esac
+
+    # If no explicit project given, use current repo
+    if [[ -z "$filter_project" ]]; then
+        local git_root
+        git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+        if [[ -n "$git_root" ]]; then
+            filter_project=$(basename "$git_root")
+        fi
+    fi
+
+    if [[ ! -d "$WORKSPACE_PATH" ]]; then
+        echo "No workspaces found"
+        return 0
+    fi
+
+    local -a entries=()
+    local project_dir ws_dir project_name ws_name timestamp
+
+    for project_dir in "$WORKSPACE_PATH"/*/; do
+        [[ -d "$project_dir" ]] || continue
+        project_name=$(basename "$project_dir")
+        [[ -n "$filter_project" && "$project_name" != "$filter_project" ]] && continue
+
+        for ws_dir in "$project_dir"*/; do
+            [[ -d "$ws_dir" ]] || continue
+            ws_name=$(basename "$ws_dir")
+            [[ "$ws_name" == ".root" ]] && continue
+
+            if [[ "$mode" == "created" ]]; then
+                timestamp=$(stat -c '%W' "$ws_dir" 2>/dev/null)
+                if [[ -z "$timestamp" || "$timestamp" == "0" ]]; then
+                    # Fallback if birth time unavailable
+                    timestamp=$(stat -c '%Y' "$ws_dir" 2>/dev/null)
+                fi
+            else
+                timestamp=$(find "$ws_dir" -not -path '*/.git/*' -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+                if [[ -z "$timestamp" ]]; then
+                    timestamp=$(stat -c '%Y' "$ws_dir" 2>/dev/null)
+                fi
+            fi
+
+            # Truncate to integer seconds
+            timestamp="${timestamp%%.*}"
+            entries+=("$timestamp $project_name/$ws_name")
+        done
+    done
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "No workspaces found"
+        return 0
+    fi
+
+    printf '%s\n' "${entries[@]}" | sort -rn | head -15 | while read -r ts entry; do
+        local iso
+        iso=$(date -d "@$ts" --iso-8601=seconds 2>/dev/null)
+        printf '%s  %s\n' "$iso" "$entry"
+    done
+}
+
 # Show help message
 _ws_help() {
     cat <<'EOF'
@@ -775,6 +850,7 @@ Usage:
   ws <name>                 Create/enter workspace with given name (requires being in a git repo)
   ws <project>/<workspace>  Create/enter workspace for specific project (works from anywhere)
   ws -l, --list             List all workspaces for current repo
+  ws -r, --recent [mode] [project]  List workspaces sorted by timestamp (mode: updated|created, default: updated; scoped to current repo or given project)
   ws -c, --clean            Delete workspaces without any changes
   ws -h, --help             Show this help message
 
@@ -822,6 +898,14 @@ _ws_completions() {
     local suggestions=()
     local has_project_suggestions=0
 
+    # Complete --recent's second argument
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    if [[ "$prev" == "--recent" || "$prev" == "-r" ]]; then
+        suggestions=("created" "updated")
+        COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
+        return
+    fi
+
     # Check if input contains a slash (project/workspace syntax)
     if [[ "$cur" == */* ]]; then
         # Extract project name from current input
@@ -850,7 +934,7 @@ _ws_completions() {
             done
         fi
         # Add options
-        suggestions+=("--list" "--clean" "--help")
+        suggestions+=("--list" "--recent" "--clean" "--help")
     else
         # In a git repo and no slash - suggest workspaces from current repo
         local repo_name=$(basename "$git_root")
@@ -876,7 +960,7 @@ _ws_completions() {
         fi
 
         # Add options
-        suggestions+=("--list" "--clean" "--help")
+        suggestions+=("--list" "--recent" "--clean" "--help")
     fi
 
     COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
@@ -998,6 +1082,13 @@ if [[ -n "$ZSH_VERSION" ]]; then
 
         # Get current word being completed
         local cur="${words[CURRENT]}"
+        local prev="${words[CURRENT-1]}"
+
+        # Complete --recent's second argument
+        if [[ "$prev" == "--recent" || "$prev" == "-r" ]]; then
+            compadd "created" "updated"
+            return
+        fi
 
         # Check if input contains a slash (project/workspace syntax)
         if [[ "$cur" == */* ]]; then
@@ -1027,7 +1118,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
                 done
             fi
             # Add options
-            options=("--list" "--clean" "--help")
+            options=("--list" "--recent" "--clean" "--help")
 
             # Add projects without space, options with space
             compadd -S '' -a projects
@@ -1056,7 +1147,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
             fi
 
             # Add options
-            options=("--list" "--clean" "--help")
+            options=("--list" "--recent" "--clean" "--help")
 
             # Add workspaces and options with space, projects without space
             compadd -a workspaces
