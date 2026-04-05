@@ -224,6 +224,10 @@ ws() {
                 _ws_clean_workspaces
                 return $?
                 ;;
+            --clean-old)
+                _ws_clean_old_workspaces "${2:-30}"
+                return $?
+                ;;
             --recent|-r)
                 _ws_recent_workspaces "${2:-updated}" "${3:-}"
                 return $?
@@ -769,6 +773,79 @@ _ws_clean_workspaces() {
     rmdir "$repo_workspace_dir" 2>/dev/null || true
 }
 
+# Delete workspaces older than N days across all projects
+_ws_clean_old_workspaces() {
+    local max_days="$1"
+
+    if ! [[ "$max_days" =~ ^[0-9]+$ ]]; then
+        echo "Error: days must be a positive integer, got '$max_days'" >&2
+        return 1
+    fi
+
+    if [[ ! -d "$WORKSPACE_PATH" ]]; then
+        echo "No workspaces found"
+        return 0
+    fi
+
+    local cutoff
+    cutoff=$(date -d "$max_days days ago" +%s 2>/dev/null)
+
+    local cleaned=0
+    local kept_dirty=0
+    local kept_recent=0
+    local project_dir ws_dir project_name ws_name timestamp
+
+    for project_dir in "$WORKSPACE_PATH"/*/; do
+        [[ -d "$project_dir" ]] || continue
+        project_name=$(basename "$project_dir")
+
+        # Resolve main repo for worktree removal
+        local main_repo=""
+        if [[ -L "$project_dir/.root" ]]; then
+            main_repo=$(readlink -f "$project_dir/.root")
+        fi
+
+        for ws_dir in "$project_dir"*/; do
+            [[ -d "$ws_dir" ]] || continue
+            ws_name=$(basename "$ws_dir")
+            [[ "$ws_name" == ".root" ]] && continue
+
+            # Get last updated timestamp (newest file excluding .git/)
+            timestamp=$(find "$ws_dir" -not -path '*/.git/*' -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+            if [[ -z "$timestamp" ]]; then
+                timestamp=$(stat -c '%Y' "$ws_dir" 2>/dev/null)
+            fi
+            timestamp="${timestamp%%.*}"
+
+            if [[ "$timestamp" -ge "$cutoff" ]]; then
+                ((kept_recent++))
+                continue
+            fi
+
+            # Old workspace - check if clean before removing
+            if [[ -n $(git -C "$ws_dir" status --porcelain 2>/dev/null) ]]; then
+                echo "Keeping old workspace with changes: $project_name/$ws_name"
+                ((kept_dirty++))
+                continue
+            fi
+
+            echo "Removing old workspace: $project_name/$ws_name"
+            if [[ -n "$main_repo" ]]; then
+                git -C "$main_repo" worktree remove "$ws_dir" --force 2>/dev/null || rm -rf "$ws_dir"
+            else
+                rm -rf "$ws_dir"
+            fi
+            ((cleaned++))
+        done
+
+        # Remove project dir if empty
+        rmdir "$project_dir" 2>/dev/null || true
+    done
+
+    echo ""
+    echo "Cleaned: $cleaned, Kept (recent): $kept_recent, Kept (dirty): $kept_dirty"
+}
+
 # List all workspaces across projects sorted by recent activity
 _ws_recent_workspaces() {
     local mode="$1"
@@ -851,7 +928,8 @@ Usage:
   ws <project>/<workspace>  Create/enter workspace for specific project (works from anywhere)
   ws -l, --list             List all workspaces for current repo
   ws -r, --recent [mode] [project]  List workspaces sorted by timestamp (mode: updated|created, default: updated; scoped to current repo or given project)
-  ws -c, --clean            Delete workspaces without any changes
+  ws -c, --clean            Delete workspaces without any changes (current repo)
+  ws --clean-old [days]     Delete clean workspaces older than N days across all projects (default: 30)
   ws -h, --help             Show this help message
 
 Sandbox:
@@ -934,7 +1012,7 @@ _ws_completions() {
             done
         fi
         # Add options
-        suggestions+=("--list" "--recent" "--clean" "--help")
+        suggestions+=("--list" "--recent" "--clean" "--clean-old" "--help")
     else
         # In a git repo and no slash - suggest workspaces from current repo
         local repo_name=$(basename "$git_root")
@@ -960,7 +1038,7 @@ _ws_completions() {
         fi
 
         # Add options
-        suggestions+=("--list" "--recent" "--clean" "--help")
+        suggestions+=("--list" "--recent" "--clean" "--clean-old" "--help")
     fi
 
     COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
@@ -1118,7 +1196,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
                 done
             fi
             # Add options
-            options=("--list" "--recent" "--clean" "--help")
+            options=("--list" "--recent" "--clean" "--clean-old" "--help")
 
             # Add projects without space, options with space
             compadd -S '' -a projects
@@ -1147,7 +1225,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
             fi
 
             # Add options
-            options=("--list" "--recent" "--clean" "--help")
+            options=("--list" "--recent" "--clean" "--clean-old" "--help")
 
             # Add workspaces and options with space, projects without space
             compadd -a workspaces
