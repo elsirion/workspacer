@@ -514,6 +514,23 @@ shell-sandbox() {
     _ws_run_sandboxed "$workdir" bash
 }
 
+# Short alias: Claude Sandbox (current dir, no worktree)
+cs() {
+    claude-sandbox "${1:-$(pwd)}"
+}
+
+# Short alias: codeX Sandbox (current dir, no worktree)
+xs() {
+    local workdir="${1:-$(pwd)}"
+
+    if ! command -v codex &>/dev/null; then
+        echo "Error: codex is not installed" >&2
+        return 1
+    fi
+
+    _ws_run_sandboxed "$workdir" codex -a never
+}
+
 # Internal: Enter workspace and run a sandboxed command
 _ws_enter_and_sandbox() {
     local workspace_arg="$1"
@@ -933,6 +950,8 @@ Usage:
   ws -h, --help             Show this help message
 
 Sandbox:
+  cs [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
+  xs [dir]                  Run codex in sandbox, no worktree (-a never)
   claude-sandbox [dir]      Run claude in an isolated sandbox (default: current dir)
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
