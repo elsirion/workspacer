@@ -408,6 +408,8 @@ _ws_run_sandboxed() {
         --ro-bind /etc/hosts /etc/hosts
         --ro-bind /etc/passwd /etc/passwd
         --ro-bind /etc/group /etc/group
+        --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf
+        --ro-bind /etc/static /etc/static
         # NixOS-specific paths
         --ro-bind /run/current-system /run/current-system
         # Provide /bin/sh for tools that expect it (e.g. GNU parallel, Perl open3)
