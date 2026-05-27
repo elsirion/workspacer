@@ -459,11 +459,6 @@ _ws_run_sandboxed() {
         return 1
     fi
 
-    # Add /etc/static if it exists (NixOS)
-    if [[ -d /etc/static ]]; then
-        bwrap_args+=(--ro-bind /etc/static /etc/static)
-    fi
-
     # Mount shell startup files from /etc so bash-completion and profile
     # initialization behave like the host shell.
     local etc_shell_files=(/etc/bashrc /etc/profile /etc/bashrc.local /etc/profile.local /etc/inputrc)
@@ -530,7 +525,8 @@ xs() {
         return 1
     fi
 
-    _ws_run_sandboxed "$workdir" codex -a never
+    # bwrap is the external sandbox; tell codex not to add its own restrictions.
+    _ws_run_sandboxed "$workdir" codex --dangerously-bypass-approvals-and-sandbox
 }
 
 # Internal: Enter workspace and run a sandboxed command
@@ -594,7 +590,8 @@ wsx() {
         return 1
     fi
 
-    _ws_enter_and_sandbox "$1" codex -a never
+    # bwrap is the external sandbox; tell codex not to add its own restrictions.
+    _ws_enter_and_sandbox "$1" codex --dangerously-bypass-approvals-and-sandbox
 }
 
 # Review a pull request in an isolated workspace with claude
@@ -953,12 +950,12 @@ Usage:
 
 Sandbox:
   cs [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
-  xs [dir]                  Run codex in sandbox, no worktree (-a never)
+  xs [dir]                  Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
   claude-sandbox [dir]      Run claude in an isolated sandbox (default: current dir)
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
   wss <name>                Enter workspace and start sandboxed shell
-  wsx <name>                Enter workspace and start sandboxed codex (-a never)
+  wsx <name>                Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
   rv <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
   rv <project> <pr-number>  Review a GitHub PR outside a repo by project name
 
