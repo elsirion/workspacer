@@ -21,6 +21,9 @@ wsc my-feature
 # Start sandboxed Codex in a workspace without approval prompts
 wsx my-feature
 
+# Start sandboxed Tau in a workspace
+wst my-feature
+
 # Return to main repository
 ws
 
@@ -83,12 +86,12 @@ $WORKSPACER_CONFIG_DIR/
 └── home_cow/
 ```
 
-- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `wsx`, `rv`, `claude-sandbox`, `shell-sandbox`).
+- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `wsx`, `wst`, `rv`, `claude-sandbox`, `shell-sandbox`).
 - `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
 - `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
 - `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.
 
-Practical setup example (minimal and safe defaults for `wss`, `wsc`, `wsx`, `rv`):
+Practical setup example (minimal and safe defaults for `wss`, `wsc`, `wsx`, `wst`, `rv`):
 
 ```bash
 cfg="${WORKSPACER_CONFIG_DIR:-$HOME/.config/workspacer}"
@@ -110,6 +113,14 @@ ln -sfn "$HOME/.local/lib" "$cfg/home_ro/.local/lib"
 ln -sfn "$HOME/.claude" "$cfg/home_rw/.claude"
 ln -sfn "$HOME/.claude.json" "$cfg/home_rw/.claude.json"
 ln -sfn "$HOME/.codex" "$cfg/home_rw/.codex"
+
+# Tau: config lives in ~/.config/tau, durable state (sessions, agents,
+# auth.d, policy.cbor) in ~/.local/state/tau. Runtime socket/pid go under
+# $XDG_RUNTIME_DIR (or /tmp/tau-$USER) and are created per-process inside
+# the sandbox, so they need no host bind.
+mkdir -p "$cfg/home_rw/.config" "$cfg/home_rw/.local/state"
+ln -sfn "$HOME/.config/tau" "$cfg/home_rw/.config/tau"
+ln -sfn "$HOME/.local/state/tau" "$cfg/home_rw/.local/state/tau"
 
 # Separate key material for sandbox only (recommended)
 mkdir -p "$cfg/sandbox-ssh" "$cfg/home_rw/.gnupg"
