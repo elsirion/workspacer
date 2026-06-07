@@ -529,6 +529,18 @@ xs() {
     _ws_run_sandboxed "$workdir" codex --dangerously-bypass-approvals-and-sandbox
 }
 
+# Short alias: Tau Sandbox (current dir, no worktree)
+ts() {
+    local workdir="${1:-$(pwd)}"
+
+    if ! command -v tau &>/dev/null; then
+        echo "Error: tau is not installed" >&2
+        return 1
+    fi
+
+    _ws_run_sandboxed "$workdir" tau
+}
+
 # Internal: Enter workspace and run a sandboxed command
 _ws_enter_and_sandbox() {
     local workspace_arg="$1"
@@ -592,6 +604,23 @@ wsx() {
 
     # bwrap is the external sandbox; tell codex not to add its own restrictions.
     _ws_enter_and_sandbox "$1" codex --dangerously-bypass-approvals-and-sandbox
+}
+
+# Enter workspace and start sandboxed tau
+wst() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        echo "wst - Enter workspace and start sandboxed tau"
+        echo ""
+        echo "Usage: wst <name>  or  wst <project>/<workspace>"
+        return 0
+    fi
+
+    if ! command -v tau &>/dev/null; then
+        echo "Error: tau is not installed" >&2
+        return 1
+    fi
+
+    _ws_enter_and_sandbox "$1" tau
 }
 
 # Review a pull request in an isolated workspace with claude
@@ -951,11 +980,13 @@ Usage:
 Sandbox:
   cs [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
   xs [dir]                  Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
+  ts [dir]                  Run tau in sandbox, no worktree
   claude-sandbox [dir]      Run claude in an isolated sandbox (default: current dir)
   shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
   wsc <name>                Enter workspace and start sandboxed claude
   wss <name>                Enter workspace and start sandboxed shell
   wsx <name>                Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
+  wst <name>                Enter workspace and start sandboxed tau
   rv <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
   rv <project> <pr-number>  Review a GitHub PR outside a repo by project name
 
@@ -1163,6 +1194,7 @@ if [[ -n "$BASH_VERSION" ]]; then
     complete -F _wsc_completions wsc
     complete -F _wsc_completions wss
     complete -F _wsc_completions wsx
+    complete -F _wsc_completions wst
     complete -F _rv_completions rv
 fi
 
@@ -1318,6 +1350,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
     compdef _wsc_zsh_completions wsc
     compdef _wsc_zsh_completions wss
     compdef _wsc_zsh_completions wsx
+    compdef _wsc_zsh_completions wst
 
     _rv_zsh_completions() {
         local -a projects options
