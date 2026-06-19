@@ -21,6 +21,10 @@ wsc my-feature
 # Start sandboxed Codex in a workspace without approval prompts
 wsx my-feature
 
+# Start sandboxed Codex with a profile-specific auth/config overlay
+wsx --profile personal my-feature
+wsx -p enterprise my-feature
+
 # Start sandboxed Tau in a workspace
 wst my-feature
 
@@ -83,13 +87,46 @@ $WORKSPACER_CONFIG_DIR/
 ├── env
 ├── home_ro/
 ├── home_rw/
-└── home_cow/
+├── home_cow/
+└── profiles/
+    ├── personal/
+    │   ├── env
+    │   ├── home_ro/
+    │   ├── home_rw/
+    │   └── home_cow/
+    └── enterprise/
+        ├── env
+        ├── home_ro/
+        ├── home_rw/
+        └── home_cow/
 ```
 
 - `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `wsx`, `wst`, `rv`, `claude-sandbox`, `shell-sandbox`).
 - `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
 - `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
 - `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.
+- `profiles/<name>/`: optional profile-specific overlay with the same `env`, `home_ro`, `home_rw`, and `home_cow` layout. Use `--profile <name>`/`-p <name>` or `WORKSPACER_PROFILE=<name>` to enable it.
+
+Profile overlays are applied after the base config, so profile mounts can replace shared base entries. This is useful for sharing common shell/git/tool config while keeping AI-agent auth data separate:
+
+```bash
+cfg="${WORKSPACER_CONFIG_DIR:-$HOME/.config/workspacer}"
+mkdir -p "$cfg/home_ro" "$cfg/profiles"/{personal,enterprise}/home_rw
+
+# Shared for all profiles:
+ln -sfn "$HOME/.gitconfig" "$cfg/home_ro/.gitconfig"
+
+# Different persisted auth/config per profile:
+mkdir -p "$cfg/profiles/personal/auth"/{codex,claude}
+mkdir -p "$cfg/profiles/enterprise/auth"/{codex,claude}
+ln -sfn "$cfg/profiles/personal/auth/codex" "$cfg/profiles/personal/home_rw/.codex"
+ln -sfn "$cfg/profiles/personal/auth/claude" "$cfg/profiles/personal/home_rw/.claude"
+ln -sfn "$cfg/profiles/enterprise/auth/codex" "$cfg/profiles/enterprise/home_rw/.codex"
+ln -sfn "$cfg/profiles/enterprise/auth/claude" "$cfg/profiles/enterprise/home_rw/.claude"
+
+wsx -p personal my-oss-change
+wsx -p enterprise confidential-work
+```
 
 Practical setup example (minimal and safe defaults for `wss`, `wsc`, `wsx`, `wst`, `rv`):
 
