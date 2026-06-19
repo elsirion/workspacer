@@ -189,6 +189,90 @@ _ws_add_parent_dirs_to_bwrap_args() {
     done
 }
 
+# Internal: reject profile names that could escape WORKSPACER_CONFIG_DIR/profiles.
+_ws_validate_profile_name() {
+    local profile="$1"
+
+    if [[ -z "$profile" ]]; then
+        echo "Error: Profile name required" >&2
+        return 1
+    fi
+
+    if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "Error: Invalid profile name '$profile' (start with a letter/number; then use letters, numbers, '.', '_', or '-')" >&2
+        return 1
+    fi
+}
+
+# Internal: parse common sandbox flags. Leaves non-flag args in _ws_parsed_args.
+_ws_parse_sandbox_cli_args() {
+    _ws_parsed_profile="${WORKSPACER_PROFILE:-}"
+    _ws_parsed_help=0
+    _ws_parsed_args=()
+
+    local arg profile
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        case "$arg" in
+            --profile|-p)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: $arg requires a profile name" >&2
+                    return 1
+                fi
+                profile="$2"
+                _ws_validate_profile_name "$profile" || return 1
+                _ws_parsed_profile="$profile"
+                shift 2
+                ;;
+            --profile=*)
+                profile="${arg#--profile=}"
+                _ws_validate_profile_name "$profile" || return 1
+                _ws_parsed_profile="$profile"
+                shift
+                ;;
+            --help|-h)
+                _ws_parsed_help=1
+                shift
+                ;;
+            --)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    _ws_parsed_args+=("$1")
+                    shift
+                done
+                ;;
+            *)
+                _ws_parsed_args+=("$arg")
+                shift
+                ;;
+        esac
+    done
+}
+
+# Internal: pass a sandbox profile to _ws_run_sandboxed only when selected.
+_ws_run_sandboxed_with_profile() {
+    local profile="$1"
+    shift
+
+    if [[ -n "$profile" ]]; then
+        _ws_run_sandboxed --profile "$profile" "$@"
+    else
+        _ws_run_sandboxed "$@"
+    fi
+}
+
+# Internal: list configured sandbox profiles for completion.
+_ws_profile_names() {
+    local profiles_dir="$WORKSPACER_CONFIG_DIR/profiles"
+    [[ -d "$profiles_dir" ]] || return 0
+
+    local profile_dir
+    for profile_dir in "$profiles_dir"/*/; do
+        [[ -d "$profile_dir" ]] || continue
+        basename "$profile_dir"
+    done
+}
+
 ws() {
     local workspace_arg="$1"
 
@@ -359,8 +443,23 @@ ws() {
 }
 
 # Internal: Run a command in a sandboxed environment
-# Usage: _ws_run_sandboxed <workdir> <command> [args...]
+# Usage: _ws_run_sandboxed [--profile <profile>] <workdir> <command> [args...]
 _ws_run_sandboxed() {
+    local profile="${WORKSPACER_PROFILE:-}"
+    if [[ "$1" == "--profile" || "$1" == "-p" ]]; then
+        if [[ $# -lt 3 ]]; then
+            echo "Error: $1 requires a profile name, workdir, and command" >&2
+            return 1
+        fi
+        profile="$2"
+        _ws_validate_profile_name "$profile" || return 1
+        shift 2
+    elif [[ "$1" == --profile=* ]]; then
+        profile="${1#--profile=}"
+        _ws_validate_profile_name "$profile" || return 1
+        shift
+    fi
+
     local workdir="$1"
     shift
     local cmd=("$@")
@@ -381,17 +480,38 @@ _ws_run_sandboxed() {
     fi
 
     local config_dir="$WORKSPACER_CONFIG_DIR"
+    local profile_config_dir=""
     local env_file="$config_dir/env"
     local home_ro_dir="$config_dir/home_ro"
     local home_rw_dir="$config_dir/home_rw"
     local home_cow_dir="$config_dir/home_cow"
+    local profile_env_file=""
+    local profile_home_ro_dir=""
+    local profile_home_rw_dir=""
+    local profile_home_cow_dir=""
     local cow_staging_root=""
     local _ws_bwrap_dir_index="|$HOME|"
     local status=0
 
+    if [[ -n "$profile" ]]; then
+        _ws_validate_profile_name "$profile" || return 1
+        profile_config_dir="$config_dir/profiles/$profile"
+        if [[ ! -d "$profile_config_dir" ]]; then
+            echo "Error: Sandbox profile '$profile' does not exist: $profile_config_dir" >&2
+            return 1
+        fi
+        profile_env_file="$profile_config_dir/env"
+        profile_home_ro_dir="$profile_config_dir/home_ro"
+        profile_home_rw_dir="$profile_config_dir/home_rw"
+        profile_home_cow_dir="$profile_config_dir/home_cow"
+    fi
+
     echo "Starting sandbox in: $workdir"
     echo "  - Filesystem: $workdir is writable"
     echo "  - Home mounts: from $config_dir/{home_ro,home_rw,home_cow}"
+    if [[ -n "$profile" ]]; then
+        echo "  - Profile: $profile ($profile_config_dir)"
+    fi
     echo "  - Network: full access"
     echo "  - Processes: isolated"
 
@@ -449,12 +569,23 @@ _ws_run_sandboxed() {
     fi
 
     # Home mounts are defined declaratively in WORKSPACER_CONFIG_DIR.
-    if [[ -d "$home_cow_dir" ]]; then
+    # Profile mounts are applied after base mounts so the profile can replace
+    # entries such as ~/.codex or ~/.claude while sharing common base mounts.
+    if [[ -d "$home_cow_dir" || -d "$profile_home_cow_dir" ]]; then
         cow_staging_root="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-home-cow.XXXXXX")"
     fi
-    if ! _ws_add_home_mounts_to_bwrap_args ro "$home_ro_dir" "$cow_staging_root" \
-        || ! _ws_add_home_mounts_to_bwrap_args rw "$home_rw_dir" "$cow_staging_root" \
-        || ! _ws_add_home_mounts_to_bwrap_args cow "$home_cow_dir" "$cow_staging_root"; then
+    local base_cow_staging_root=""
+    local profile_cow_staging_root=""
+    if [[ -n "$cow_staging_root" ]]; then
+        base_cow_staging_root="$cow_staging_root/base"
+        profile_cow_staging_root="$cow_staging_root/profile"
+    fi
+    if ! _ws_add_home_mounts_to_bwrap_args ro "$home_ro_dir" "$base_cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args rw "$home_rw_dir" "$base_cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args cow "$home_cow_dir" "$base_cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args ro "$profile_home_ro_dir" "$profile_cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args rw "$profile_home_rw_dir" "$profile_cow_staging_root" \
+        || ! _ws_add_home_mounts_to_bwrap_args cow "$profile_home_cow_dir" "$profile_cow_staging_root"; then
         [[ -n "$cow_staging_root" ]] && rm -rf "$cow_staging_root"
         return 1
     fi
@@ -473,6 +604,10 @@ _ws_run_sandboxed() {
     if [[ -f "$env_file" ]]; then
         echo "  - Environment: loaded from $env_file"
         _ws_add_env_file_to_bwrap_args "$env_file"
+    fi
+    if [[ -f "$profile_env_file" ]]; then
+        echo "  - Environment: loaded from $profile_env_file"
+        _ws_add_env_file_to_bwrap_args "$profile_env_file"
     fi
 
     # Run with direnv environment if available
@@ -494,6 +629,21 @@ _ws_run_sandboxed() {
 
 # Run claude in a sandboxed environment
 claude-sandbox() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "claude-sandbox - Run claude in an isolated sandbox"
+        echo ""
+        echo "Usage: claude-sandbox [-p profile|--profile profile] [dir]"
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
+        echo "Error: Too many arguments" >&2
+        echo "Usage: claude-sandbox [-p profile|--profile profile] [dir]" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
     local workdir="${1:-$(pwd)}"
 
     # Check for claude
@@ -502,22 +652,52 @@ claude-sandbox() {
         return 1
     fi
 
-    _ws_run_sandboxed "$workdir" claude --dangerously-skip-permissions
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" claude --dangerously-skip-permissions
 }
 
 # Run a shell in a sandboxed environment
 shell-sandbox() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "shell-sandbox - Run a shell in an isolated sandbox"
+        echo ""
+        echo "Usage: shell-sandbox [-p profile|--profile profile] [dir]"
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
+        echo "Error: Too many arguments" >&2
+        echo "Usage: shell-sandbox [-p profile|--profile profile] [dir]" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
     local workdir="${1:-$(pwd)}"
-    _ws_run_sandboxed "$workdir" bash
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" bash
 }
 
 # Short alias: Claude Sandbox (current dir, no worktree)
 cs() {
-    claude-sandbox "${1:-$(pwd)}"
+    claude-sandbox "$@"
 }
 
 # Short alias: codeX Sandbox (current dir, no worktree)
 xs() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "xs - Run codex in an isolated sandbox"
+        echo ""
+        echo "Usage: xs [-p profile|--profile profile] [dir]"
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
+        echo "Error: Too many arguments" >&2
+        echo "Usage: xs [-p profile|--profile profile] [dir]" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
     local workdir="${1:-$(pwd)}"
 
     if ! command -v codex &>/dev/null; then
@@ -526,11 +706,26 @@ xs() {
     fi
 
     # bwrap is the external sandbox; tell codex not to add its own restrictions.
-    _ws_run_sandboxed "$workdir" codex --dangerously-bypass-approvals-and-sandbox
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" codex --dangerously-bypass-approvals-and-sandbox
 }
 
 # Short alias: Tau Sandbox (current dir, no worktree)
 ts() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "ts - Run tau in an isolated sandbox"
+        echo ""
+        echo "Usage: ts [-p profile|--profile profile] [dir]"
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
+        echo "Error: Too many arguments" >&2
+        echo "Usage: ts [-p profile|--profile profile] [dir]" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
     local workdir="${1:-$(pwd)}"
 
     if ! command -v tau &>/dev/null; then
@@ -538,13 +733,14 @@ ts() {
         return 1
     fi
 
-    _ws_run_sandboxed "$workdir" tau
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" tau
 }
 
 # Internal: Enter workspace and run a sandboxed command
 _ws_enter_and_sandbox() {
-    local workspace_arg="$1"
-    shift
+    local profile="$1"
+    local workspace_arg="$2"
+    shift 2
     local cmd=("$@")
 
     if [[ -z "$workspace_arg" ]]; then
@@ -556,16 +752,24 @@ _ws_enter_and_sandbox() {
     ws "$workspace_arg" || return 1
 
     # Run sandboxed command in the workspace
-    _ws_run_sandboxed "$(pwd)" "${cmd[@]}"
+    _ws_run_sandboxed_with_profile "$profile" "$(pwd)" "${cmd[@]}"
 }
 
 # Enter workspace and start sandboxed claude
 wsc() {
-    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wsc - Enter workspace and start sandboxed claude"
         echo ""
-        echo "Usage: wsc <name>  or  wsc <project>/<workspace>"
+        echo "Usage: wsc [-p profile|--profile profile] <name>"
+        echo "   or: wsc [-p profile|--profile profile] <project>/<workspace>"
         return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
+        echo "Error: Workspace name required" >&2
+        echo "Usage: wsc [-p profile|--profile profile] <name>" >&2
+        return 1
     fi
 
     if ! command -v claude &>/dev/null; then
@@ -573,28 +777,46 @@ wsc() {
         return 1
     fi
 
-    _ws_enter_and_sandbox "$1" claude --dangerously-skip-permissions
+    set -- "${_ws_parsed_args[@]}"
+    _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" claude --dangerously-skip-permissions
 }
 
 # Enter workspace and start sandboxed shell
 wss() {
-    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wss - Enter workspace and start sandboxed shell"
         echo ""
-        echo "Usage: wss <name>  or  wss <project>/<workspace>"
+        echo "Usage: wss [-p profile|--profile profile] <name>"
+        echo "   or: wss [-p profile|--profile profile] <project>/<workspace>"
         return 0
     fi
 
-    _ws_enter_and_sandbox "$1" bash
+    if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
+        echo "Error: Workspace name required" >&2
+        echo "Usage: wss [-p profile|--profile profile] <name>" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
+    _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" bash
 }
 
 # Enter workspace and start sandboxed codex without approval prompts
 wsx() {
-    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wsx - Enter workspace and start sandboxed codex (no approval prompts)"
         echo ""
-        echo "Usage: wsx <name>  or  wsx <project>/<workspace>"
+        echo "Usage: wsx [-p profile|--profile profile] <name>"
+        echo "   or: wsx [-p profile|--profile profile] <project>/<workspace>"
         return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
+        echo "Error: Workspace name required" >&2
+        echo "Usage: wsx [-p profile|--profile profile] <name>" >&2
+        return 1
     fi
 
     if ! command -v codex &>/dev/null; then
@@ -603,16 +825,25 @@ wsx() {
     fi
 
     # bwrap is the external sandbox; tell codex not to add its own restrictions.
-    _ws_enter_and_sandbox "$1" codex --dangerously-bypass-approvals-and-sandbox
+    set -- "${_ws_parsed_args[@]}"
+    _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" codex --dangerously-bypass-approvals-and-sandbox
 }
 
 # Enter workspace and start sandboxed tau
 wst() {
-    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wst - Enter workspace and start sandboxed tau"
         echo ""
-        echo "Usage: wst <name>  or  wst <project>/<workspace>"
+        echo "Usage: wst [-p profile|--profile profile] <name>"
+        echo "   or: wst [-p profile|--profile profile] <project>/<workspace>"
         return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
+        echo "Error: Workspace name required" >&2
+        echo "Usage: wst [-p profile|--profile profile] <name>" >&2
+        return 1
     fi
 
     if ! command -v tau &>/dev/null; then
@@ -620,18 +851,20 @@ wst() {
         return 1
     fi
 
-    _ws_enter_and_sandbox "$1" tau
+    set -- "${_ws_parsed_args[@]}"
+    _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" tau
 }
 
 # Review a pull request in an isolated workspace with claude
 rv() {
-    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
         cat <<'EOF'
 rv - Review a GitHub pull request in an isolated workspace
 
 Usage:
-  rv <pr-number>
-  rv <project> <pr-number>
+  rv [-p profile|--profile profile] <pr-number>
+  rv [-p profile|--profile profile] <project> <pr-number>
 
 Creates/enters workspace pr-<pr-number>-review, checks out the PR branch
 with gh, then launches claude in interactive sandboxed mode with a review prompt.
@@ -643,7 +876,8 @@ EOF
 
     local project_name=""
     local pr_number=""
-    case "$#" in
+    set -- "${_ws_parsed_args[@]}"
+    case "${#_ws_parsed_args[@]}" in
         1)
             pr_number="$1"
             ;;
@@ -653,7 +887,7 @@ EOF
             ;;
         *)
             echo "Error: Invalid arguments" >&2
-            echo "Usage: rv <pr-number>  or  rv <project> <pr-number>" >&2
+            echo "Usage: rv [-p profile|--profile profile] <pr-number>  or  rv [-p profile|--profile profile] <project> <pr-number>" >&2
             return 1
             ;;
     esac
@@ -710,7 +944,7 @@ EOF
     fi
 
     local review_prompt="Review pull request #${pr_number} in this repository. Start by checking changed files and commits, then report findings ordered by severity with file/line references."
-    _ws_run_sandboxed "$(pwd)" claude --dangerously-skip-permissions "$review_prompt"
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$(pwd)" claude --dangerously-skip-permissions "$review_prompt"
 }
 
 # List all projects (repos) that have workspaces
@@ -978,17 +1212,17 @@ Usage:
   ws -h, --help             Show this help message
 
 Sandbox:
-  cs [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
-  xs [dir]                  Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
-  ts [dir]                  Run tau in sandbox, no worktree
-  claude-sandbox [dir]      Run claude in an isolated sandbox (default: current dir)
-  shell-sandbox [dir]       Run bash in an isolated sandbox (default: current dir)
-  wsc <name>                Enter workspace and start sandboxed claude
-  wss <name>                Enter workspace and start sandboxed shell
-  wsx <name>                Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
-  wst <name>                Enter workspace and start sandboxed tau
-  rv <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
-  rv <project> <pr-number>  Review a GitHub PR outside a repo by project name
+  cs [-p profile] [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
+  xs [-p profile] [dir]                  Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
+  ts [-p profile] [dir]                  Run tau in sandbox, no worktree
+  claude-sandbox [-p profile] [dir]      Run claude in an isolated sandbox (default: current dir)
+  shell-sandbox [-p profile] [dir]       Run bash in an isolated sandbox (default: current dir)
+  wsc [-p profile] <name>                Enter workspace and start sandboxed claude
+  wss [-p profile] <name>                Enter workspace and start sandboxed shell
+  wsx [-p profile] <name>                Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
+  wst [-p profile] <name>                Enter workspace and start sandboxed tau
+  rv [-p profile] <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
+  rv [-p profile] <project> <pr-number>  Review a GitHub PR outside a repo by project name
 
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
@@ -1011,6 +1245,7 @@ Sandbox Details:
     home_ro/  -> each entry path bind mounted to ~/path read-only
     home_rw/  -> each entry path bind mounted to ~/path read-write
     home_cow/ -> each entry path copied then bind mounted to ~/path read-write
+    profiles/<name>/{env,home_ro,home_rw,home_cow} -> optional profile overlay
   - Process isolation (cannot see/signal other processes)
   - If .envrc exists, the direnv environment is loaded before entering
 EOF
@@ -1101,11 +1336,20 @@ _ws_completions() {
 # Completion function for wsc (bash) - like ws but only workspace names
 _wsc_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local git_root
     git_root=$(git rev-parse --show-toplevel 2>/dev/null)
 
     local suggestions=()
     local has_project_suggestions=0
+
+    if [[ "$prev" == "--profile" || "$prev" == "-p" ]]; then
+        while IFS= read -r profile_name; do
+            suggestions+=("$profile_name")
+        done < <(_ws_profile_names)
+        COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
+        return
+    fi
 
     # Check if input contains a slash (project/workspace syntax)
     if [[ "$cur" == */* ]]; then
@@ -1132,7 +1376,7 @@ _wsc_completions() {
                 fi
             done
         fi
-        suggestions+=("--help")
+        suggestions+=("--profile" "-p" "--help")
     else
         # In a git repo - suggest workspaces from current repo
         local repo_name=$(basename "$git_root")
@@ -1156,7 +1400,7 @@ _wsc_completions() {
                 fi
             done
         fi
-        suggestions+=("--help")
+        suggestions+=("--profile" "-p" "--help")
     fi
 
     COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
@@ -1169,7 +1413,16 @@ _wsc_completions() {
 # Completion function for rv (bash)
 _rv_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local suggestions=()
+
+    if [[ "$prev" == "--profile" || "$prev" == "-p" ]]; then
+        while IFS= read -r profile_name; do
+            suggestions+=("$profile_name")
+        done < <(_ws_profile_names)
+        COMPREPLY=($(compgen -W "${suggestions[*]}" -- "$cur"))
+        return
+    fi
 
     if [[ "$COMP_CWORD" -eq 1 ]]; then
         if [[ -d "$WORKSPACE_PATH" ]]; then
@@ -1179,7 +1432,7 @@ _rv_completions() {
                 fi
             done
         fi
-        suggestions+=("--help")
+        suggestions+=("--profile" "-p" "--help")
     elif [[ "$COMP_CWORD" -eq 2 ]]; then
         # Second argument is PR number when first arg is a project name.
         suggestions=()
@@ -1291,8 +1544,15 @@ if [[ -n "$ZSH_VERSION" ]]; then
         local git_root
         git_root=$(git rev-parse --show-toplevel 2>/dev/null)
 
-        local -a workspaces projects options
+        local -a workspaces projects options profiles
         local cur="${words[CURRENT]}"
+        local prev="${words[CURRENT-1]}"
+
+        if [[ "$prev" == "--profile" || "$prev" == "-p" ]]; then
+            profiles=($(_ws_profile_names))
+            compadd -a profiles
+            return
+        fi
 
         if [[ "$cur" == */* ]]; then
             local project_prefix="${cur%%/*}"
@@ -1317,7 +1577,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
                     fi
                 done
             fi
-            options=("--help")
+            options=("--profile" "-p" "--help")
             compadd -S '' -a projects
             compadd -a options
         else
@@ -1340,7 +1600,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
                     fi
                 done
             fi
-            options=("--help")
+            options=("--profile" "-p" "--help")
             compadd -a workspaces
             compadd -S '' -a projects
             compadd -a options
@@ -1353,7 +1613,14 @@ if [[ -n "$ZSH_VERSION" ]]; then
     compdef _wsc_zsh_completions wst
 
     _rv_zsh_completions() {
-        local -a projects options
+        local -a projects options profiles
+        local prev="${words[CURRENT-1]}"
+
+        if [[ "$prev" == "--profile" || "$prev" == "-p" ]]; then
+            profiles=($(_ws_profile_names))
+            compadd -a profiles
+            return
+        fi
 
         if [[ "$CURRENT" -eq 2 ]]; then
             if [[ -d "$WORKSPACE_PATH" ]]; then
@@ -1363,7 +1630,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
                     fi
                 done
             fi
-            options=("--help")
+            options=("--profile" "-p" "--help")
             compadd -a projects
             compadd -a options
         elif [[ "$CURRENT" -eq 3 ]]; then
