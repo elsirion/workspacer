@@ -6,55 +6,68 @@ A `git worktree`-based workspace manager for git repositories. Allows creating i
 
 ## Usage
 
-Most common workflow: `wss` to enter a workspace and start an isolated shell.
+Canonical usage from `ws --help`:
 
-```bash
-# Create/enter workspace and start sandboxed shell (recommended)
-wss my-feature
+```text
+ws - Workspace manager for git repositories
 
-# Create or enter a workspace (run from any git repo)
-ws my-feature
+Usage:
+  ws                        Go back to main repository directory
+  ws <name>                 Create/enter workspace with given name (requires being in a git repo)
+  ws <project>/<workspace>  Create/enter workspace for specific project (works from anywhere)
+  ws -l, --list             List all workspaces for current repo
+  ws -r, --recent [updated|created] [project]
+                            List workspaces sorted by timestamp (default: updated;
+                            scoped to current repo or given project)
+  ws -c, --clean            Delete workspaces without any changes (current repo)
+  ws --clean-old [days]     Delete clean workspaces older than N days across all projects (default: 30)
+  ws -h, --help             Show this help message
 
-# Start sandboxed Claude in a workspace
-wsc my-feature
+Sandbox profile flags:
+  Usage lines abbreviate profile selection as [-p <profile>].
+  Sandbox commands also accept --profile <profile>, --profile=<profile>,
+  or WORKSPACER_PROFILE=<profile>.
 
-# Start sandboxed Codex in a workspace without approval prompts
-wsx my-feature
+Sandbox commands:
+  claude-sandbox [-p <profile>] [dir]          Run claude in an isolated sandbox (default: current dir)
+  cs [-p <profile>] [dir]                      Alias for claude-sandbox
+  shell-sandbox [-p <profile>] [dir]           Run bash in an isolated sandbox (default: current dir)
+  xs [-p <profile>] [dir]                      Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
+  ts [-p <profile>] [dir]                      Run tau in sandbox, no worktree
+  wsc [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed claude
+  wss [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed shell
+  wsx [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
+  wst [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed tau
+  rv [-p <profile>] <pr-number>                Review a GitHub PR in an isolated workspace (in repo)
+  rv [-p <profile>] <project> <pr-number>      Review a GitHub PR outside a repo by project name
 
-# Start sandboxed Codex with a profile-specific auth/config overlay
-wsx --profile personal my-feature
-wsx -p enterprise my-feature
+Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
+organized by repository name.
 
-# Start sandboxed Tau in a workspace
-wst my-feature
+When entering a workspace, a branch named <year>-<month>-<name> is created
+or checked out, and direnv is allowed if .envrc exists.
 
-# Return to main repository
-ws
+The <project>/<workspace> syntax allows you to enter workspaces from any directory,
+even when not in a git repository. The project name is the repository directory name.
 
-# List workspaces for current repo
-ws --list
-ws -l
+Use 'popd' to return to the previous directory after entering a workspace.
 
-# Delete workspaces without any changes
-ws --clean
-ws -c
-
-# Show help
-ws --help
-ws -h
-
-# Review GitHub PR #123 in an isolated workspace with Claude (inside repo)
-rv 123
-
-# Review GitHub PR #123 from anywhere by specifying project name
-rv myrepo 123
-
-# Return to previous directory
-popd
+Sandbox Details:
+  Sandbox commands run tools inside a bubblewrap container with:
+  - Full network access
+  - Read-write access to the specified working directory
+  - Read-only access to /nix (for nix run/develop)
+  - Home mounts from WORKSPACER_CONFIG_DIR (default: ~/.config/workspacer):
+    env       -> KEY=VALUE variables loaded into sandbox environment
+    home_ro/  -> each entry path bind mounted to ~/path read-only
+    home_rw/  -> each entry path bind mounted to ~/path read-write
+    home_cow/ -> each entry path copied then bind mounted to ~/path read-write
+    profiles/<name>/{env,home_ro,home_rw,home_cow} -> optional profile overlay
+  - Process isolation (cannot see/signal other processes)
+  - If .envrc exists, the direnv environment is loaded before entering
 ```
 
-For `rv <project> <pr>`, the project must already exist under `$WORKSPACE_PATH`
-(for example from a prior `ws` workspace in that repo).
+For command-specific help, run the command with `--help` (for example, `wss --help` or `rv --help`).
 
 ## Configuration
 
@@ -101,11 +114,11 @@ $WORKSPACER_CONFIG_DIR/
         └── home_cow/
 ```
 
-- `env`: dotenv-style `KEY=VALUE` lines loaded into sandbox commands (`wss`, `wsc`, `wsx`, `wst`, `rv`, `claude-sandbox`, `shell-sandbox`).
+- `env`: dotenv-style `KEY=VALUE` lines loaded into all sandbox commands (`claude-sandbox`/`cs`, `shell-sandbox`, `xs`, `ts`, `wsc`, `wss`, `wsx`, `wst`, `rv`).
 - `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
 - `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
 - `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.
-- `profiles/<name>/`: optional profile-specific overlay with the same `env`, `home_ro`, `home_rw`, and `home_cow` layout. Use `--profile <name>`/`-p <name>` or `WORKSPACER_PROFILE=<name>` to enable it.
+- `profiles/<name>/`: optional profile-specific overlay with the same `env`, `home_ro`, `home_rw`, and `home_cow` layout. Use `--profile <name>`, `--profile=<name>`, `-p <name>`, or `WORKSPACER_PROFILE=<name>` to enable it.
 
 Profile overlays are applied after the base config, so profile mounts can replace shared base entries. This is useful for sharing common shell/git/tool config while keeping AI-agent auth data separate:
 
@@ -128,7 +141,7 @@ wsx -p personal my-oss-change
 wsx -p enterprise confidential-work
 ```
 
-Practical setup example (minimal and safe defaults for `wss`, `wsc`, `wsx`, `wst`, `rv`):
+Practical setup example (minimal and safe defaults for all sandbox commands):
 
 ```bash
 cfg="${WORKSPACER_CONFIG_DIR:-$HOME/.config/workspacer}"

@@ -273,6 +273,10 @@ _ws_profile_names() {
     done
 }
 
+_ws_print_profile_help_note() {
+    echo "Also accepts --profile <profile>, --profile=<profile>, or WORKSPACER_PROFILE=<profile>."
+}
+
 ws() {
     local workspace_arg="$1"
 
@@ -633,13 +637,14 @@ claude-sandbox() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "claude-sandbox - Run claude in an isolated sandbox"
         echo ""
-        echo "Usage: claude-sandbox [-p profile|--profile profile] [dir]"
+        echo "Usage: claude-sandbox [-p <profile>] [dir]"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
         echo "Error: Too many arguments" >&2
-        echo "Usage: claude-sandbox [-p profile|--profile profile] [dir]" >&2
+        echo "Usage: claude-sandbox [-p <profile>] [dir]" >&2
         return 1
     fi
 
@@ -661,13 +666,14 @@ shell-sandbox() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "shell-sandbox - Run a shell in an isolated sandbox"
         echo ""
-        echo "Usage: shell-sandbox [-p profile|--profile profile] [dir]"
+        echo "Usage: shell-sandbox [-p <profile>] [dir]"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
         echo "Error: Too many arguments" >&2
-        echo "Usage: shell-sandbox [-p profile|--profile profile] [dir]" >&2
+        echo "Usage: shell-sandbox [-p <profile>] [dir]" >&2
         return 1
     fi
 
@@ -687,13 +693,14 @@ xs() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "xs - Run codex in an isolated sandbox"
         echo ""
-        echo "Usage: xs [-p profile|--profile profile] [dir]"
+        echo "Usage: xs [-p <profile>] [dir]"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
         echo "Error: Too many arguments" >&2
-        echo "Usage: xs [-p profile|--profile profile] [dir]" >&2
+        echo "Usage: xs [-p <profile>] [dir]" >&2
         return 1
     fi
 
@@ -715,13 +722,14 @@ ts() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "ts - Run tau in an isolated sandbox"
         echo ""
-        echo "Usage: ts [-p profile|--profile profile] [dir]"
+        echo "Usage: ts [-p <profile>] [dir]"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
         echo "Error: Too many arguments" >&2
-        echo "Usage: ts [-p profile|--profile profile] [dir]" >&2
+        echo "Usage: ts [-p <profile>] [dir]" >&2
         return 1
     fi
 
@@ -761,14 +769,15 @@ wsc() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wsc - Enter workspace and start sandboxed claude"
         echo ""
-        echo "Usage: wsc [-p profile|--profile profile] <name>"
-        echo "   or: wsc [-p profile|--profile profile] <project>/<workspace>"
+        echo "Usage: wsc [-p <profile>] <name>"
+        echo "   or: wsc [-p <profile>] <project>/<workspace>"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
         echo "Error: Workspace name required" >&2
-        echo "Usage: wsc [-p profile|--profile profile] <name>" >&2
+        echo "Usage: wsc [-p <profile>] <name>" >&2
         return 1
     fi
 
@@ -787,14 +796,15 @@ wss() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wss - Enter workspace and start sandboxed shell"
         echo ""
-        echo "Usage: wss [-p profile|--profile profile] <name>"
-        echo "   or: wss [-p profile|--profile profile] <project>/<workspace>"
+        echo "Usage: wss [-p <profile>] <name>"
+        echo "   or: wss [-p <profile>] <project>/<workspace>"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
         echo "Error: Workspace name required" >&2
-        echo "Usage: wss [-p profile|--profile profile] <name>" >&2
+        echo "Usage: wss [-p <profile>] <name>" >&2
         return 1
     fi
 
@@ -808,14 +818,15 @@ wsx() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wsx - Enter workspace and start sandboxed codex (no approval prompts)"
         echo ""
-        echo "Usage: wsx [-p profile|--profile profile] <name>"
-        echo "   or: wsx [-p profile|--profile profile] <project>/<workspace>"
+        echo "Usage: wsx [-p <profile>] <name>"
+        echo "   or: wsx [-p <profile>] <project>/<workspace>"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
         echo "Error: Workspace name required" >&2
-        echo "Usage: wsx [-p profile|--profile profile] <name>" >&2
+        echo "Usage: wsx [-p <profile>] <name>" >&2
         return 1
     fi
 
@@ -835,14 +846,15 @@ wst() {
     if [[ "$_ws_parsed_help" -eq 1 ]]; then
         echo "wst - Enter workspace and start sandboxed tau"
         echo ""
-        echo "Usage: wst [-p profile|--profile profile] <name>"
-        echo "   or: wst [-p profile|--profile profile] <project>/<workspace>"
+        echo "Usage: wst [-p <profile>] <name>"
+        echo "   or: wst [-p <profile>] <project>/<workspace>"
+        _ws_print_profile_help_note
         return 0
     fi
 
     if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
         echo "Error: Workspace name required" >&2
-        echo "Usage: wst [-p profile|--profile profile] <name>" >&2
+        echo "Usage: wst [-p <profile>] <name>" >&2
         return 1
     fi
 
@@ -863,12 +875,13 @@ rv() {
 rv - Review a GitHub pull request in an isolated workspace
 
 Usage:
-  rv [-p profile|--profile profile] <pr-number>
-  rv [-p profile|--profile profile] <project> <pr-number>
+  rv [-p <profile>] <pr-number>
+  rv [-p <profile>] <project> <pr-number>
 
 Creates/enters workspace pr-<pr-number>-review, checks out the PR branch
 with gh, then launches claude in interactive sandboxed mode with a review prompt.
 
+Also accepts --profile <profile>, --profile=<profile>, or WORKSPACER_PROFILE=<profile>.
 When run outside a git repo, pass project name first (repository directory name).
 EOF
         return 0
@@ -887,7 +900,7 @@ EOF
             ;;
         *)
             echo "Error: Invalid arguments" >&2
-            echo "Usage: rv [-p profile|--profile profile] <pr-number>  or  rv [-p profile|--profile profile] <project> <pr-number>" >&2
+            echo "Usage: rv [-p <profile>] <pr-number>  or  rv [-p <profile>] <project> <pr-number>" >&2
             return 1
             ;;
     esac
@@ -1206,23 +1219,30 @@ Usage:
   ws <name>                 Create/enter workspace with given name (requires being in a git repo)
   ws <project>/<workspace>  Create/enter workspace for specific project (works from anywhere)
   ws -l, --list             List all workspaces for current repo
-  ws -r, --recent [mode] [project]  List workspaces sorted by timestamp (mode: updated|created, default: updated; scoped to current repo or given project)
+  ws -r, --recent [updated|created] [project]
+                            List workspaces sorted by timestamp (default: updated;
+                            scoped to current repo or given project)
   ws -c, --clean            Delete workspaces without any changes (current repo)
   ws --clean-old [days]     Delete clean workspaces older than N days across all projects (default: 30)
   ws -h, --help             Show this help message
 
-Sandbox:
-  cs [-p profile] [dir]                  Run claude in sandbox, no worktree (alias: claude-sandbox)
-  xs [-p profile] [dir]                  Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
-  ts [-p profile] [dir]                  Run tau in sandbox, no worktree
-  claude-sandbox [-p profile] [dir]      Run claude in an isolated sandbox (default: current dir)
-  shell-sandbox [-p profile] [dir]       Run bash in an isolated sandbox (default: current dir)
-  wsc [-p profile] <name>                Enter workspace and start sandboxed claude
-  wss [-p profile] <name>                Enter workspace and start sandboxed shell
-  wsx [-p profile] <name>                Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
-  wst [-p profile] <name>                Enter workspace and start sandboxed tau
-  rv [-p profile] <pr-number>            Review a GitHub PR in an isolated workspace (in repo)
-  rv [-p profile] <project> <pr-number>  Review a GitHub PR outside a repo by project name
+Sandbox profile flags:
+  Usage lines abbreviate profile selection as [-p <profile>].
+  Sandbox commands also accept --profile <profile>, --profile=<profile>,
+  or WORKSPACER_PROFILE=<profile>.
+
+Sandbox commands:
+  claude-sandbox [-p <profile>] [dir]          Run claude in an isolated sandbox (default: current dir)
+  cs [-p <profile>] [dir]                      Alias for claude-sandbox
+  shell-sandbox [-p <profile>] [dir]           Run bash in an isolated sandbox (default: current dir)
+  xs [-p <profile>] [dir]                      Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
+  ts [-p <profile>] [dir]                      Run tau in sandbox, no worktree
+  wsc [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed claude
+  wss [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed shell
+  wsx [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
+  wst [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed tau
+  rv [-p <profile>] <pr-number>                Review a GitHub PR in an isolated workspace (in repo)
+  rv [-p <profile>] <project> <pr-number>      Review a GitHub PR outside a repo by project name
 
 Workspaces are stored in $WORKSPACE_PATH (default: ~/.local/share/workspaces)
 organized by repository name.
@@ -1236,7 +1256,7 @@ even when not in a git repository. The project name is the repository directory 
 Use 'popd' to return to the previous directory after entering a workspace.
 
 Sandbox Details:
-  The claude-sandbox command runs claude inside a bubblewrap container with:
+  Sandbox commands run tools inside a bubblewrap container with:
   - Full network access
   - Read-write access to the specified working directory
   - Read-only access to /nix (for nix run/develop)
