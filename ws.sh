@@ -606,6 +606,33 @@ _ws_run_sandboxed() {
         fi
     done
 
+    # Desktop notifications: expose a filtered D-Bus socket so sandboxed tools
+    # can use notify-send. Filtering to org.freedesktop.Notifications avoids
+    # granting full session bus access, which would be a sandbox escape
+    # (e.g. via the systemd user manager).
+    local dbus_proxy_pid=""
+    local dbus_proxy_dir=""
+    if command -v xdg-dbus-proxy &>/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        dbus_proxy_dir="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-dbus.XXXXXX")"
+        dbus_proxy_pid="$(xdg-dbus-proxy "$DBUS_SESSION_BUS_ADDRESS" "$dbus_proxy_dir/bus" \
+            --filter --talk=org.freedesktop.Notifications >/dev/null 2>&1 & echo $!)"
+        local _ws_dbus_wait
+        for _ws_dbus_wait in $(seq 1 50); do
+            [[ -S "$dbus_proxy_dir/bus" ]] && break
+            sleep 0.02
+        done
+        if [[ -S "$dbus_proxy_dir/bus" ]]; then
+            echo "  - Notifications: D-Bus proxy (org.freedesktop.Notifications only)"
+            bwrap_args+=(
+                --bind "$dbus_proxy_dir/bus" "/run/user/$(id -u)/bus"
+                --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=/run/user/$(id -u)/bus"
+            )
+        else
+            kill "$dbus_proxy_pid" 2>/dev/null
+            dbus_proxy_pid=""
+        fi
+    fi
+
     # Load environment from config env file.
     if [[ -f "$env_file" ]]; then
         echo "  - Environment: loaded from $env_file"
@@ -628,6 +655,13 @@ _ws_run_sandboxed() {
 
     if [[ -n "$cow_staging_root" ]]; then
         rm -rf "$cow_staging_root"
+    fi
+
+    if [[ -n "$dbus_proxy_pid" ]]; then
+        kill "$dbus_proxy_pid" 2>/dev/null
+    fi
+    if [[ -n "$dbus_proxy_dir" ]]; then
+        rm -rf "$dbus_proxy_dir"
     fi
 
     return "$status"
