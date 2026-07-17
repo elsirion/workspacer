@@ -534,6 +534,8 @@ _ws_run_sandboxed() {
         --ro-bind /etc/group /etc/group
         --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf
         --ro-bind /etc/static /etc/static
+        # Nix config (nix.conf enables nix-command/flakes, registry.json)
+        --ro-bind /etc/nix /etc/nix
         # NixOS-specific paths
         --ro-bind /run/current-system /run/current-system
         # Provide /bin/sh for tools that expect it (e.g. GNU parallel, Perl open3)
