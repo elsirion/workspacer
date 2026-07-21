@@ -563,15 +563,37 @@ _ws_run_sandboxed() {
         --setenv HOME "$HOME"
     )
 
-    # If workdir is a git worktree, mount the main repo's .git directory
-    # Worktrees have a .git file (not directory) pointing to .git/worktrees/<name>
+    # If workdir is a git worktree, mount the main repo's .git directory so git
+    # works inside the sandbox. Worktrees have a .git *file* (not directory)
+    # pointing to <main-repo>/.git/worktrees/<name>; that backend lives outside
+    # the workspace and is shared with the host and every other worktree sandbox.
+    #
+    # Resolving it is best-effort by nature, but a worktree is useless without it:
+    # if the main repo is momentarily gone at launch (moved, pruned, or being
+    # churned by a parallel workspacer session) the bind is silently skipped and
+    # the agent is dropped into a worktree whose .git points at a path that does
+    # not exist in the sandbox. Every git command then fails with the opaque
+    # "fatal: not a git repository", with no hint that it is a mount problem.
+    # Fail loudly at launch instead, so no work starts that can't be committed.
     if [[ -f "$workdir/.git" ]]; then
         local git_common_dir
         git_common_dir="$(git -C "$workdir" rev-parse --git-common-dir 2>/dev/null)"
         if [[ -n "$git_common_dir" ]]; then
-            git_common_dir="$(cd "$workdir" && cd "$git_common_dir" && pwd)"
-            bwrap_args+=(--bind "$git_common_dir" "$git_common_dir")
+            git_common_dir="$(cd "$workdir" && cd "$git_common_dir" && pwd 2>/dev/null)"
         fi
+        # Verify the backing repo (and this worktree's admin dir under it) are
+        # actually present on the host right now — that's what will be bound in.
+        if [[ -z "$git_common_dir" ]] || [[ ! -d "$git_common_dir" ]] \
+            || ! git -C "$workdir" rev-parse --is-inside-work-tree &>/dev/null; then
+            echo "Error: '$workdir' is a git worktree but its backing repository is unavailable." >&2
+            echo "       .git points to: $(sed 's/^gitdir: //' "$workdir/.git" 2>/dev/null)" >&2
+            echo "       Without it git will not work inside the sandbox (you would hit" >&2
+            echo "       'fatal: not a git repository'). The main repo may have been moved or" >&2
+            echo "       pruned, or another workspacer session is modifying it. Aborting so no" >&2
+            echo "       work starts that can't be committed; retry once the repository is back." >&2
+            return 1
+        fi
+        bwrap_args+=(--bind "$git_common_dir" "$git_common_dir")
     fi
 
     # Home mounts are defined declaratively in WORKSPACER_CONFIG_DIR.
