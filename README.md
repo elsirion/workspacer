@@ -34,10 +34,12 @@ Sandbox commands:
   shell-sandbox [-p <profile>] [dir]           Run bash in an isolated sandbox (default: current dir)
   xs [-p <profile>] [dir]                      Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
   ts [-p <profile>] [dir]                      Run tau in sandbox, no worktree
+  os [-p <profile>] [dir]                      Run opencode in sandbox, no worktree
   wsc [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed claude
   wss [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed shell
   wsx [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
   wst [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed tau
+  wso [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed opencode
   rv [-p <profile>] <pr-number>                Review a GitHub PR in an isolated workspace (in repo)
   rv [-p <profile>] <project> <pr-number>      Review a GitHub PR outside a repo by project name
 
@@ -114,7 +116,7 @@ $WORKSPACER_CONFIG_DIR/
         └── home_cow/
 ```
 
-- `env`: dotenv-style `KEY=VALUE` lines loaded into all sandbox commands (`claude-sandbox`/`cs`, `shell-sandbox`, `xs`, `ts`, `wsc`, `wss`, `wsx`, `wst`, `rv`).
+- `env`: dotenv-style `KEY=VALUE` lines loaded into all sandbox commands (`claude-sandbox`/`cs`, `shell-sandbox`, `xs`, `ts`, `os`, `wsc`, `wss`, `wsx`, `wst`, `wso`, `rv`).
 - `home_ro/`: each entry path is bind-mounted to the same path under `~` read-only.
 - `home_rw/`: each entry path is bind-mounted to the same path under `~` read-write.
 - `home_cow/`: each entry path is copied to a temporary dir, then mounted read-write to the same path under `~`.
@@ -171,6 +173,13 @@ ln -sfn "$HOME/.codex" "$cfg/home_rw/.codex"
 mkdir -p "$cfg/home_rw/.config" "$cfg/home_rw/.local/state"
 ln -sfn "$HOME/.config/tau" "$cfg/home_rw/.config/tau"
 ln -sfn "$HOME/.local/state/tau" "$cfg/home_rw/.local/state/tau"
+
+# Opencode: config (opencode.jsonc, plugin node_modules) in ~/.config/opencode,
+# durable state (auth.json, session db) in ~/.local/share/opencode. Both need
+# to be writable inside the sandbox.
+mkdir -p "$cfg/home_rw/.local/share"
+ln -sfn "$HOME/.config/opencode" "$cfg/home_rw/.config/opencode"
+ln -sfn "$HOME/.local/share/opencode" "$cfg/home_rw/.local/share/opencode"
 
 # Separate key material for sandbox only (recommended)
 mkdir -p "$cfg/sandbox-ssh" "$cfg/home_rw/.gnupg"

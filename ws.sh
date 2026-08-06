@@ -802,6 +802,34 @@ ts() {
     _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" tau
 }
 
+# Short alias: Opencode Sandbox (current dir, no worktree)
+os() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "os - Run opencode in an isolated sandbox"
+        echo ""
+        echo "Usage: os [-p <profile>] [dir]"
+        _ws_print_profile_help_note
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -gt 1 ]]; then
+        echo "Error: Too many arguments" >&2
+        echo "Usage: os [-p <profile>] [dir]" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
+    local workdir="${1:-$(pwd)}"
+
+    if ! command -v opencode &>/dev/null; then
+        echo "Error: opencode is not installed" >&2
+        return 1
+    fi
+
+    _ws_run_sandboxed_with_profile "$_ws_parsed_profile" "$workdir" opencode
+}
+
 # Internal: Enter workspace and run a sandboxed command
 _ws_enter_and_sandbox() {
     local profile="$1"
@@ -923,6 +951,33 @@ wst() {
 
     set -- "${_ws_parsed_args[@]}"
     _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" tau
+}
+
+# Enter workspace and start sandboxed opencode
+wso() {
+    _ws_parse_sandbox_cli_args "$@" || return 1
+    if [[ "$_ws_parsed_help" -eq 1 ]]; then
+        echo "wso - Enter workspace and start sandboxed opencode"
+        echo ""
+        echo "Usage: wso [-p <profile>] <name>"
+        echo "   or: wso [-p <profile>] <project>/<workspace>"
+        _ws_print_profile_help_note
+        return 0
+    fi
+
+    if [[ "${#_ws_parsed_args[@]}" -ne 1 ]]; then
+        echo "Error: Workspace name required" >&2
+        echo "Usage: wso [-p <profile>] <name>" >&2
+        return 1
+    fi
+
+    if ! command -v opencode &>/dev/null; then
+        echo "Error: opencode is not installed" >&2
+        return 1
+    fi
+
+    set -- "${_ws_parsed_args[@]}"
+    _ws_enter_and_sandbox "$_ws_parsed_profile" "$1" opencode
 }
 
 # Review a pull request in an isolated workspace with claude
@@ -1295,10 +1350,12 @@ Sandbox commands:
   shell-sandbox [-p <profile>] [dir]           Run bash in an isolated sandbox (default: current dir)
   xs [-p <profile>] [dir]                      Run codex in sandbox, no worktree (bypass codex approvals + internal sandbox)
   ts [-p <profile>] [dir]                      Run tau in sandbox, no worktree
+  os [-p <profile>] [dir]                      Run opencode in sandbox, no worktree
   wsc [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed claude
   wss [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed shell
   wsx [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed codex (bypass codex approvals + internal sandbox)
   wst [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed tau
+  wso [-p <profile>] <name|project/workspace>  Enter workspace and start sandboxed opencode
   rv [-p <profile>] <pr-number>                Review a GitHub PR in an isolated workspace (in repo)
   rv [-p <profile>] <project> <pr-number>      Review a GitHub PR outside a repo by project name
 
@@ -1526,6 +1583,7 @@ if [[ -n "$BASH_VERSION" ]]; then
     complete -F _wsc_completions wss
     complete -F _wsc_completions wsx
     complete -F _wsc_completions wst
+    complete -F _wsc_completions wso
     complete -F _rv_completions rv
 fi
 
@@ -1689,6 +1747,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
     compdef _wsc_zsh_completions wss
     compdef _wsc_zsh_completions wsx
     compdef _wsc_zsh_completions wst
+    compdef _wsc_zsh_completions wso
 
     _rv_zsh_completions() {
         local -a projects options profiles
