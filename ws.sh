@@ -78,6 +78,38 @@ _ws_get_main_repo_for_project() {
     return 1
 }
 
+# Internal: remove sandbox scratch directories whose owning shell is gone.
+#
+# The teardown at the end of _ws_run_sandboxed only runs if the shell gets
+# there. A sandbox is a long-lived foreground process, so its shell is often
+# killed outright instead -- terminal closed, session torn down, SIGKILL.
+#
+# A signal handler cannot cover this: bash defers traps until the running
+# foreground command returns, so trapping HUP/TERM around a sandbox would both
+# miss the teardown for weeks and swallow the signal that was meant to end it.
+# Sweeping at the next launch is late but reliable, and it also catches the
+# SIGKILL case that no handler could.
+#
+# Scratch names embed the owning shell's PID, and a directory is removed only
+# once that PID is gone, so concurrent sandboxes never reap each other.
+_ws_reap_orphaned_scratch() {
+    local tmp_root="${TMPDIR:-/tmp}"
+    local dir base owner_pid
+
+    for dir in "$tmp_root"/workspacer-dbus.*.* "$tmp_root"/workspacer-home-cow.*.*; do
+        [[ -d "$dir" ]] || continue
+
+        base="${dir##*/}"
+        owner_pid="${base#*.}"
+        owner_pid="${owner_pid%%.*}"
+
+        [[ "$owner_pid" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$owner_pid" 2>/dev/null && continue
+
+        rm -rf "$dir"
+    done
+}
+
 # Internal: refuse to create a workspace from inside a sandbox.
 #
 # A sandbox bind-mounts only its own workdir; the rest of $WORKSPACE_PATH is
@@ -508,6 +540,8 @@ _ws_run_sandboxed() {
         return 1
     fi
 
+    _ws_reap_orphaned_scratch
+
     local config_dir="$WORKSPACER_CONFIG_DIR"
     local profile_config_dir=""
     local env_file="$config_dir/env"
@@ -638,7 +672,7 @@ _ws_run_sandboxed() {
     # Profile mounts are applied after base mounts so the profile can replace
     # entries such as ~/.codex or ~/.claude while sharing common base mounts.
     if [[ -d "$home_cow_dir" || -d "$profile_home_cow_dir" ]]; then
-        cow_staging_root="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-home-cow.XXXXXX")"
+        cow_staging_root="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-home-cow.$$.XXXXXX")"
     fi
     local base_cow_staging_root=""
     local profile_cow_staging_root=""
@@ -673,7 +707,7 @@ _ws_run_sandboxed() {
     local dbus_proxy_pid=""
     local dbus_proxy_dir=""
     if command -v xdg-dbus-proxy &>/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        dbus_proxy_dir="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-dbus.XXXXXX")"
+        dbus_proxy_dir="$(mktemp -d "${TMPDIR:-/tmp}/workspacer-dbus.$$.XXXXXX")"
         dbus_proxy_pid="$(xdg-dbus-proxy "$DBUS_SESSION_BUS_ADDRESS" "$dbus_proxy_dir/bus" \
             --filter --talk=org.freedesktop.Notifications >/dev/null 2>&1 & echo $!)"
         local _ws_dbus_wait
