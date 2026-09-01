@@ -6,6 +6,10 @@
 : "${WORKSPACE_PATH:=${XDG_DATA_HOME:-$HOME/.local/share}/workspaces}"
 # Sandbox config directory
 : "${WORKSPACER_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/workspacer}"
+# Sizes (in MiB) of the sandbox's RAM-backed /tmp and home. See the --tmpfs
+# mounts in _ws_run_sandboxed for why these are capped.
+: "${WORKSPACER_TMP_SIZE_MB:=8192}"
+: "${WORKSPACER_HOME_SIZE_MB:=2048}"
 
 # Internal: get the main worktree path for a git repository path.
 _ws_get_worktree_main_repo() {
@@ -71,6 +75,25 @@ _ws_get_main_repo_for_project() {
         done
     fi
 
+    return 1
+}
+
+# Internal: refuse to create a workspace from inside a sandbox.
+#
+# A sandbox bind-mounts only its own workdir; the rest of $WORKSPACE_PATH is
+# part of the sandbox's RAM-backed home. A workspace created there is a real
+# git worktree living in tmpfs: invisible to the host, counted against the
+# home size cap, and destroyed without warning when the sandbox exits, taking
+# any commits made in it along. Fail up front rather than let work start
+# somewhere it cannot be committed from.
+_ws_reject_nested_workspace() {
+    local workspace_dir="$1"
+
+    [[ -n "${WORKSPACER_SANDBOX:-}" ]] || return 0
+
+    echo "Error: Refusing to create a workspace inside a sandbox: $workspace_dir" >&2
+    echo "       It would live in the sandbox's RAM-backed home and be lost when the" >&2
+    echo "       sandbox exits. Create it on the host instead, then sandbox into it." >&2
     return 1
 }
 
@@ -385,6 +408,8 @@ ws() {
 
     # Create workspace if it doesn't exist
     if [[ ! -d "$workspace_dir" ]]; then
+        _ws_reject_nested_workspace "$workspace_dir" || return 1
+
         echo "Creating new workspace: $workspace_dir"
 
         # Create parent directory
@@ -552,15 +577,28 @@ _ws_run_sandboxed() {
         --dev /dev
         --proc /proc
         --ro-bind /sys /sys
-        # Tmpfs for temp files and fake home
-        --tmpfs /tmp
-        --tmpfs "$HOME"
+        # Tmpfs for temp files and fake home.
+        #
+        # Both are RAM-backed and are only freed when the sandbox exits, which
+        # for an agent session can be weeks. An uncapped tmpfs is sized at half
+        # of system memory, so a runaway write consumes the machine silently and
+        # invisibly: the pages are shmem, so they show up in neither the
+        # sandbox's RSS nor any process listing. Cap both instead, so runaway
+        # writes fail loudly and early.
+        #
+        # Nothing written here survives the sandbox. Anything that should
+        # persist belongs in a home_ro/home_rw/home_cow mount.
+        --size $((WORKSPACER_TMP_SIZE_MB * 1024 * 1024)) --tmpfs /tmp
+        --size $((WORKSPACER_HOME_SIZE_MB * 1024 * 1024)) --tmpfs "$HOME"
         # Workspace directory (read-write)
         --bind "$workdir" "$workdir"
         # Set working directory
         --chdir "$workdir"
         # Set HOME to actual home (on tmpfs, but with config mounted below)
         --setenv HOME "$HOME"
+        # Let ws detect that it is running inside a sandbox and refuse to
+        # create nested workspaces there (see _ws_reject_nested_workspace).
+        --setenv WORKSPACER_SANDBOX 1
     )
 
     # If workdir is a git worktree, mount the main repo's .git directory so git
@@ -1383,6 +1421,14 @@ Sandbox Details:
     profiles/<name>/{env,home_ro,home_rw,home_cow} -> optional profile overlay
   - Process isolation (cannot see/signal other processes)
   - If .envrc exists, the direnv environment is loaded before entering
+  - A RAM-backed /tmp and home, capped at WORKSPACER_TMP_SIZE_MB (default
+    8192) and WORKSPACER_HOME_SIZE_MB (default 2048). Only the workdir and
+    the home mounts above are on disk; everything else the sandbox writes to
+    ~ is discarded on exit, so persist state by adding a home mount. Filling
+    either tmpfs reports "No space left on device" even when the disk is
+    empty; raise the corresponding variable if a tool legitimately needs more.
+  - ws refuses to create workspaces inside a sandbox: they would live in the
+    RAM-backed home and be lost on exit. Create them on the host instead.
 EOF
 }
 

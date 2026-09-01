@@ -67,6 +67,14 @@ Sandbox Details:
     profiles/<name>/{env,home_ro,home_rw,home_cow} -> optional profile overlay
   - Process isolation (cannot see/signal other processes)
   - If .envrc exists, the direnv environment is loaded before entering
+  - A RAM-backed /tmp and home, capped at WORKSPACER_TMP_SIZE_MB (default
+    8192) and WORKSPACER_HOME_SIZE_MB (default 2048). Only the workdir and
+    the home mounts above are on disk; everything else the sandbox writes to
+    ~ is discarded on exit, so persist state by adding a home mount. Filling
+    either tmpfs reports "No space left on device" even when the disk is
+    empty; raise the corresponding variable if a tool legitimately needs more.
+  - ws refuses to create workspaces inside a sandbox: they would live in the
+    RAM-backed home and be lost on exit. Create them on the host instead.
 ```
 
 For command-specific help, run the command with `--help` (for example, `wss --help` or `rv --help`).
@@ -93,6 +101,36 @@ Set a custom sandbox config directory (default: `~/.config/workspacer`):
 
 ```bash
 export WORKSPACER_CONFIG_DIR="$HOME/.config/workspacer"
+```
+
+Set the sandbox tmpfs sizes in MiB (defaults: 8192 for `/tmp`, 2048 for `~`):
+
+```bash
+export WORKSPACER_TMP_SIZE_MB=8192
+export WORKSPACER_HOME_SIZE_MB=2048
+```
+
+Both are RAM-backed and are only freed when the sandbox exits, so they are
+capped rather than left at the tmpfs default of half of system memory. The
+sandbox home is meant to stay small: the workdir and the home mounts are on
+disk, and everything else is discarded on exit. Give a cache a `home_rw/`
+entry rather than a bigger home — that keeps it on disk *and* shares it
+across sandboxes instead of re-downloading it into RAM every launch:
+
+```bash
+cfg="${WORKSPACER_CONFIG_DIR:-$HOME/.config/workspacer}"
+mkdir -p "$cfg/home_rw"/{.cargo,.cache}
+
+# Cargo's content-addressed caches, plus the lock files cargo uses to
+# serialize access to them — without those, concurrent sandboxes would
+# mutate a shared registry with no mutual exclusion. Note that ~/.cargo
+# itself is not mounted, so credentials.toml stays out of the sandbox.
+for entry in registry git .package-cache .package-cache-mutate .global-cache; do
+  ln -sfn "$HOME/.cargo/$entry" "$cfg/home_rw/.cargo/$entry"
+done
+
+# Nix flake input, tarball and eval caches.
+ln -sfn "$HOME/.cache/nix" "$cfg/home_rw/.cache/nix"
 ```
 
 Sandbox home/config layout:
