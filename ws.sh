@@ -737,13 +737,34 @@ _ws_run_sandboxed() {
         _ws_add_env_file_to_bwrap_args "$profile_env_file"
     fi
 
+    # Drop cargo target-dir overrides inherited from the launching shell when
+    # they point outside the workdir. They usually come from a dev shell
+    # entered in *another* workspace, and dev shells commonly only default them
+    # (`${CARGO_BUILD_TARGET_DIR:-$root/target}`), so the stale value survives
+    # the .envrc load below. Its path isn't mounted, so every build silently
+    # lands in the RAM-backed home and fills it. Unset, the workspace's own
+    # .envrc (or cargo's default ./target) picks a directory inside the
+    # workdir. An env file can still set them deliberately (e.g. to a shared
+    # target dir mounted via home_rw): bwrap applies --setenv afterwards.
+    local -a env_scrub=(env)
+    local target_var target_dir
+    for target_var in CARGO_BUILD_TARGET_DIR CARGO_TARGET_DIR; do
+        target_dir="$(printenv "$target_var")" || continue
+        # Relative paths resolve against the cwd, which is the workdir.
+        [[ "$target_dir" == /* ]] || continue
+        if [[ "${target_dir%/}" != "$workdir" && "$target_dir" != "$workdir"/* ]]; then
+            echo "  - Dropped $target_var=$target_dir (outside workdir, not mounted)"
+            env_scrub+=(-u "$target_var")
+        fi
+    done
+
     # Run with direnv environment if available
     if command -v direnv &>/dev/null && [[ -f "$workdir/.envrc" ]]; then
         echo "  - Environment: loaded from .envrc"
-        direnv exec "$workdir" bwrap "${bwrap_args[@]}" "${cmd[@]}"
+        "${env_scrub[@]}" direnv exec "$workdir" bwrap "${bwrap_args[@]}" "${cmd[@]}"
         status=$?
     else
-        bwrap "${bwrap_args[@]}" "${cmd[@]}"
+        "${env_scrub[@]}" bwrap "${bwrap_args[@]}" "${cmd[@]}"
         status=$?
     fi
 
